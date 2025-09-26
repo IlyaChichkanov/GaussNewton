@@ -2,7 +2,10 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from systems import System
 
-
+from jaxadi import convert
+from jax import numpy as jnp
+from jax.experimental.ode import odeint
+from jax import jit
 from casadi import SX, vertcat, jacobian, Function
 import casadi as ca
 ATOL = 1e-5
@@ -20,6 +23,9 @@ class SystemJacobian:
         self.res_f = Function('func', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [f])
         self.res_h = Function('h_x', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [h_observ])
 
+        self.res_f_jax = convert(self.res_f) 
+
+
         J_h_x = jacobian(h_observ, vertcat(*[*state_var.elements()]))
         self.compute_jacobian_h_x = Function('J_h_x', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [J_h_x])
 
@@ -28,9 +34,11 @@ class SystemJacobian:
 
         J_p = jacobian(f, vertcat(*[*theta_var.elements()]))
         self.compute_jacobian_theta = Function('J_p', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [J_p])
+        self.compute_jacobian_theta_jax = convert(Function('J_p', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [J_p]))
 
         J_x = jacobian(f, vertcat(*[*state_var.elements()]))
         self.compute_jacobian_x = Function('J_x', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [J_x])
+        self.compute_jacobian_x_jax = convert(Function('J_x', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [J_x]))
 
         self.STATE_LENGTH = len(state_var.elements())
         self.THETA_LENGTH = len(theta_var.elements())
@@ -42,117 +50,145 @@ class SystemJacobian:
         return self.STATE_LENGTH, self.THETA_LENGTH, self.MEAS_LENGTH
     
     def h_x(self, state, t, theta):
-        try:
-            inp_signals = self.f_sym.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'h_x interpolation error, time {t}')
+        inp_signals = self.f_sym.get_input_signals(t)
+        # try:
+        #     inp_signals = self.f_sym.get_input_signals(t)
+        # except ValueError:
+        #     inp_signals = np.zeros(self.inp_signal_len)
+        #     print(f'h_x interpolation error, time {t}')
         return np.array(self.res_h(*[*state, *inp_signals, *theta])).T[0]
     
     def f_x_theta(self, state, t, theta):
-        try:
-            inp_signals = self.f_sym.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'f_x_theta interpolation error, time {t}')
+        inp_signals = self.f_sym.get_input_signals(t)
+        # try:
+        #     inp_signals = self.f_sym.get_input_signals(t)
+        # except ValueError:
+        #     inp_signals = np.zeros(self.inp_signal_len)
+        #     print(f'f_x_theta interpolation error, time {t}')
         return np.array(self.res_f(*[*state, *inp_signals, *theta])).T[0]
+    
+    def f_x_theta_jax(self, y, t, *theta):
+        inp_signals = self.f_sym.get_input_signals(t)
+        # try:
+        #     inp_signals = self.f_sym.get_input_signals(t)
+        # except ValueError:
+        #     inp_signals = np.zeros(self.inp_signal_len)
+        #     print(f'f_x_theta interpolation error, time {t}')
 
+        return jnp.array(self.res_f_jax(*y, *inp_signals, *theta)[0].flatten())
+        
     def dh_dx(self, state, t, theta):
-        try:
-            inp_signals = self.f_sym.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'dh_dx interpolation error, time {t}')
+        inp_signals = self.f_sym.get_input_signals(t)
+        # try:
+        #     inp_signals = self.f_sym.get_input_signals(t)
+        # except ValueError:
+        #     inp_signals = np.zeros(self.inp_signal_len)
+        #     print(f'dh_dx interpolation error, time {t}')
         return np.array(self.compute_jacobian_h_x(*[*state, *inp_signals, *theta]))
     
     def dh_dtheta(self, state, t, theta):
-        try:
-            inp_signals = self.f_sym.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'dh_dtheta interpolation error, time {t}')
+        inp_signals = self.f_sym.get_input_signals(t)
+        # try:
+        #     inp_signals = self.f_sym.get_input_signals(t)
+        # except ValueError:
+        #     inp_signals = np.zeros(self.inp_signal_len)
+        #     print(f'dh_dtheta interpolation error, time {t}')
         return np.array(self.compute_jacobian_h_theta(*[*state, *inp_signals, *theta]))
-    
+
+    def df_dtheta_jax(self, state, t, theta):
+        inp_signals = self.f_sym.get_input_signals(t)
+        # try:
+        #     inp_signals = self.f_sym.get_input_signals(t)
+        # except ValueError:
+        #     inp_signals = np.zeros(self.inp_signal_len)
+        #     print(f'df_dtheta interpolation error, time {t}')
+        return jnp.array(self.compute_jacobian_theta_jax(*[*state, *inp_signals, *theta]))[0]
+      
     def df_dtheta(self, state, t, theta):
-        try:
-            inp_signals = self.f_sym.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'df_dtheta interpolation error, time {t}')
+        inp_signals = self.f_sym.get_input_signals(t)
+        # try:
+        #     inp_signals = self.f_sym.get_input_signals(t)
+        # except ValueError:
+        #     inp_signals = np.zeros(self.inp_signal_len)
+        #     print(f'df_dtheta interpolation error, time {t}')
         return np.array(self.compute_jacobian_theta(*[*state, *inp_signals, *theta]))
 
 
     def df_dx(self, state, t, theta):
-        try:
-            inp_signals = self.f_sym.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'df_dx interpolation error, time {t}')
+        inp_signals = self.f_sym.get_input_signals(t)
+        # try:
+        #     inp_signals = self.f_sym.get_input_signals(t)
+        # except ValueError:
+        #     inp_signals = np.zeros(self.inp_signal_len)
+        #     print(f'df_dx interpolation error, time {t}')
         return np.array(self.compute_jacobian_x(*[*state, *inp_signals, *theta]))
-
-    def get_jacobian_solution(self, c0, theta, t_span, t_eval1, t_eval2 = None):
+    
+    def df_dx_jax(self, state, t, theta):
+        inp_signals = self.f_sym.get_input_signals(t)
+        # try:
+        #     inp_signals = self.f_sym.get_input_signals(t)
+        # except ValueError:
+        #     inp_signals = np.zeros(self.inp_signal_len)
+        #     print(f'df_dx interpolation error, time {t}')
+        return jnp.array(self.compute_jacobian_x_jax(*[*state, *inp_signals, *theta]))
+    
+    def get_jacobian_solution(self, c0, theta, t_eval1):
         J0 = np.concatenate((np.zeros((self.STATE_LENGTH, self.THETA_LENGTH)).flatten(), np.identity((self.STATE_LENGTH)).flatten()))
         initial_conditions = np.concatenate((c0, J0))
         system = lambda t, y: self.make_full_system(y, t, theta[:self.THETA_LENGTH])
         solution1 = solve_ivp(
             system,
-            t_span,
+            (t_eval1[0], t_eval1[-1]),
             initial_conditions,
             t_eval = t_eval1,
             method = self.method,
             atol = ATOL, rtol = RTOL
         )
 
-        solution2 = solve_ivp(
-            system,
-            t_span,
-            initial_conditions,
-            t_eval = t_eval2,
-            method = self.method,
-            atol = ATOL,  rtol = RTOL
-        )
-        if(not (solution1.success and solution1.success)):
+        if(not (solution1.success)):
             raise ValueError("solution disconverge")
-        return solution1.y, solution2.y
-        sol = solve_ivp(system, t_span, initial_conditions, method='LSODA', dense_output=True)
-        if(not (sol.success)):
-            raise ValueError("solution disconverge")
-        solution1 = sol.sol(t_eval1)
-        solution2 = sol.sol(t_eval2)
-        return solution1, solution2
+        return solution1.y
+    
+        # sol = solve_ivp(system, t_span, initial_conditions, method='LSODA', dense_output=True)
+        # if(not (sol.success)):
+        #     raise ValueError("solution disconverge")
+        # solution1 = sol.sol(t_eval1)
+        # solution2 = sol.sol(t_eval2)
+        # return solution1, solution2
 
-    def get_solution(self, c0, theta, t_span, t_eval1, t_eval2 = None):
+    def get_solution(self, c0, theta, t_eval):
         system = lambda t, y: self.f_x_theta(y, t, theta[:self.THETA_LENGTH])    #self.make_full_system(y, t, theta[:self.THETA_LENGTH])
         solution1 = solve_ivp(
             system,
-            t_span,
+            (t_eval[0], t_eval[-1]),
             c0,
-            t_eval = t_eval1,
+            t_eval = t_eval,
             method = self.method,
             atol = ATOL, rtol = RTOL
         )
 
-        solution2 = solve_ivp(
-            system,
-            t_span,
-            c0,
-            t_eval = t_eval2,
-            method = self.method,
-            atol = ATOL,  rtol = RTOL
-        )
-        if(not (solution1.success and solution2.success)):
+        if(not (solution1.success)):
             print(solution1.message)
             raise ValueError("solution disconverge")
-        return solution1.y, solution2.y
+        return solution1.y
 
-        sol = solve_ivp(system, t_span, c0, method='LSODA', dense_output=True)
-        if(not (sol.success)):
-            raise ValueError("solution disconverge")
-        solution1 = sol.sol(t_eval1)
-        solution2 = sol.sol(t_eval2)
-        return solution1, solution2
-        
-    
+        # sol = solve_ivp(system, t_span, c0, method='LSODA', dense_output=True)
+        # if(not (sol.success)):
+        #     raise ValueError("solution disconverge")
+        # solution1 = sol.sol(t_eval1)
+        # solution2 = sol.sol(t_eval2)
+        # return solution1, solution2
+
+    def get_solution_jax(self, c0, theta, t_eval1, t_eval2 = None):
+        solution = odeint(
+            self.f_x_theta_jax,
+            jnp.array(c0),
+            jnp.array(t_eval1),
+            *theta[:self.THETA_LENGTH]
+        )
+        return np.array(solution)
+          
+
     def JacobianX(self, state,t, theta):
         xy = state[:self.STATE_LENGTH]
         Jx = state[self.STATE_LENGTH : self.STATE_LENGTH + self.THETA_LENGTH * self.STATE_LENGTH].reshape((self.STATE_LENGTH, self.THETA_LENGTH))
@@ -300,9 +336,9 @@ class MultipleShooting:
         for shoot in range(N_shoot):
             c0 = variables[THETA_LENGTH + N_shoot * batch * STATE_LENGTH  + shoot * STATE_LENGTH: THETA_LENGTH + N_shoot * batch * STATE_LENGTH + (shoot + 1) * STATE_LENGTH]
             t0, t1, t_eval_curr, t_eval_curr_measur, measurement_indexes_curr = time_manger.get_time_interval(shoot)
-            solution = self.system.get_jacobian_solution(c0, variables[:THETA_LENGTH], (t0, t1), t_eval_curr, t_eval_curr_measur)
-            J_raw = solution[1][STATE_LENGTH:]
-            state_sample = solution[1][0:STATE_LENGTH]
+            solution = self.system.get_jacobian_solution(c0, variables[:THETA_LENGTH], t_eval_curr_measur)
+            J_raw = solution[STATE_LENGTH:]
+            state_sample = solution[0:STATE_LENGTH]
             for i in range(len(measurement_indexes_curr)):
                 state = state_sample[:, i]
                 t = t_eval_curr_measur[i]
@@ -327,10 +363,11 @@ class MultipleShooting:
                 J_G[shoot - 1][:, THETA_LENGTH + STATE_LENGTH * (shoot) : THETA_LENGTH + (STATE_LENGTH) * (shoot + 1)] = - np.eye(STATE_LENGTH)
                 R_G[shoot - 1] = -(state_prev - c0)
 
-            J_raw = solution[0][STATE_LENGTH:]
+            solution = self.system.get_jacobian_solution(c0, variables[:THETA_LENGTH],  t_eval_curr)
+            J_raw = solution[STATE_LENGTH:]
             Jx_prev = J_raw[INDEX_THETA, -1].reshape(STATE_LENGTH, THETA_LENGTH)
             Jc_prev = J_raw[INDEX_C, -1].reshape(STATE_LENGTH, STATE_LENGTH) 
-            state_raw = solution[0][:STATE_LENGTH]
+            state_raw = solution[:STATE_LENGTH]
             state_prev = state_raw[:, -1] 
 
         J = J.reshape(N_measurement * MEAS_LEN, -1)

@@ -2,7 +2,7 @@ import casadi as ca
 from casadi import SX, vertcat
 import numpy as np
 from abc import ABC, abstractmethod
-
+import time
 class System:
     def __init__(self):
         pass
@@ -125,8 +125,11 @@ class Lotka_voltera(System):
         f = vertcat(dx_dt, dy_dt)
         return vertcat(*self.state), vertcat(*self.u), vertcat(*self.theta), f
     
+    # def get_input_signals(self, t):
+    #     return [0.1 * t - np.sin(t)]
+    
     def get_input_signals(self, t):
-        return [0.1 * t - np.sin(t)]
+        return [0.0]
     
     # def observation(self):
     #     x, y = self.state
