@@ -277,12 +277,12 @@ class TimeIntervalManager:
         t_eval_curr_measur = []
         for id in measurement_indexes_curr:
             t_eval_curr_measur.append(self.t_eval_measurements[id])
-        t_eval_curr_measur = np.array(t_eval_curr_measur)
-
         t0 = t_eval_curr_measur[0]
         t1 = self.t_eval_measurements[measurement_indexes_curr[-1] + 1]
-        t_eval_curr = np.linspace(t0, t1, int((t1 - t0)*20))
-        return t0, t1, t_eval_curr, t_eval_curr_measur, measurement_indexes_curr
+        t_eval_curr_measur.append(t1)
+        t_eval_curr_measur = np.array(t_eval_curr_measur)
+
+        return t_eval_curr_measur, measurement_indexes_curr
     
 
 class MultipleShooting:
@@ -352,7 +352,7 @@ class MultipleShooting:
         state_prev = None
         for shoot in range(N_shoot):
             c0 = variables[THETA_LENGTH + N_shoot * batch * STATE_LENGTH  + shoot * STATE_LENGTH: THETA_LENGTH + N_shoot * batch * STATE_LENGTH + (shoot + 1) * STATE_LENGTH]
-            t0, t1, t_eval_curr, t_eval_curr_measur, measurement_indexes_curr = time_manger.get_time_interval(shoot)
+            t_eval_curr_measur, measurement_indexes_curr = time_manger.get_time_interval(shoot)
             if(self.use_jax):
                 solution = self.system.get_jacobian_solution_jax(c0, variables[:THETA_LENGTH], t_eval_curr_measur)
             else:
@@ -383,16 +383,10 @@ class MultipleShooting:
                 J_G[shoot - 1][:, THETA_LENGTH + STATE_LENGTH * (shoot) : THETA_LENGTH + (STATE_LENGTH) * (shoot + 1)] = - np.eye(STATE_LENGTH)
                 R_G[shoot - 1] = -(state_prev - c0)
 
-            if(self.use_jax):
-                solution = self.system.get_jacobian_solution_jax(c0, variables[:THETA_LENGTH], t_eval_curr)
-            else:
-                solution = self.system.get_jacobian_solution(c0, variables[:THETA_LENGTH], t_eval_curr)
 
-
-            J_raw = solution[STATE_LENGTH:]
             Jx_prev = J_raw[INDEX_THETA, -1].reshape(STATE_LENGTH, THETA_LENGTH)
             Jc_prev = J_raw[INDEX_C, -1].reshape(STATE_LENGTH, STATE_LENGTH) 
-            state_raw = solution[:STATE_LENGTH]
+            state_raw = state_sample[:STATE_LENGTH]
             state_prev = state_raw[:, -1] 
 
         J = J.reshape(N_measurement * MEAS_LEN, -1)
