@@ -8,6 +8,7 @@ from jax.experimental.ode import odeint
 from jax import jit
 from casadi import SX, vertcat, jacobian, Function
 import casadi as ca
+import time as tm_module
 ATOL = 1e-5
 RTOL = 1e-5
 
@@ -15,22 +16,23 @@ class SystemJacobian:
     def __init__(self, f_sym: System, method: str =  'RK45'):
         self.f_sym = f_sym
         self.method = method
-        #self.STATE_LENGTH, self.THETA_LENGTH = f_sym.get_dimentions()
         state_var, inp_signal_var, theta_var, f = self.f_sym()
 
         h_observ = self.f_sym.observation()
         self.inp_signal_len = len(inp_signal_var.elements())
         self.res_f = Function('func', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [f])
-        self.res_h = Function('h_x', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [h_observ])
-
         self.res_f_jax = convert(self.res_f, compile = True) 
 
+        self.res_h = Function('h_x', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [h_observ])
+        self.res_h_jax = convert(Function('h_x', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [h_observ]), compile = True) 
 
         J_h_x = jacobian(h_observ, vertcat(*[*state_var.elements()]))
         self.compute_jacobian_h_x = Function('J_h_x', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [J_h_x])
+        self.compute_jacobian_h_x_jax = convert(self.compute_jacobian_h_x, compile = True) 
 
         J_h_theta = jacobian(h_observ, vertcat(*[*theta_var.elements()]))
         self.compute_jacobian_h_theta = Function('J_h_theta', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [J_h_theta])
+        self.compute_jacobian_h_theta_jax =convert(self.compute_jacobian_h_theta, compile = True) 
 
         J_p = jacobian(f, vertcat(*[*theta_var.elements()]))
         self.compute_jacobian_theta = Function('J_p', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [J_p])
@@ -43,93 +45,66 @@ class SystemJacobian:
         self.STATE_LENGTH = len(state_var.elements())
         self.THETA_LENGTH = len(theta_var.elements())
         self.MEAS_LENGTH = len(h_observ.elements())
-        # len(self.h_x(
-        #     np.ones(self.THETA_LENGTH), np.ones(self.THETA_LENGTH),  0))
+
         
     def get_dimentions(self):
         return self.STATE_LENGTH, self.THETA_LENGTH, self.MEAS_LENGTH
     
-    def h_x(self, state, t, theta):
-        #inp_signals = self.f_sym.get_input_signals(t)
+    def get_inp_signals(self, t):
         try:
             inp_signals = self.f_sym.get_input_signals(t)
         except ValueError:
             inp_signals = np.zeros(self.inp_signal_len)
-            print(f'h_x interpolation error, time {t}')
+            print(f'df_dx interpolation error, time {t}')
+        return inp_signals
+
+    def h_x(self, state, t, theta):
+        inp_signals = np.zeros(self.inp_signal_len) #self.get_inp_signals(t)
         return np.array(self.res_h(*[*state, *inp_signals, *theta])).T[0]
     
+    # def h_x_jax(self, state, t, theta):
+    #     inp_signals = self.get_inp_signals(t)
+    #     return np.array(self.res_h_jax(*[*state, *inp_signals, *theta])).flatten()
+    
     def f_x_theta(self, state, t, theta):
-        #inp_signals = self.f_sym.get_input_signals(t)
-        try:
-            inp_signals = self.f_sym.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'f_x_theta interpolation error, time {t}')
+        inp_signals = self.get_inp_signals(t)
         return np.array(self.res_f(*[*state, *inp_signals, *theta])).T[0]
     
     def f_x_theta_jax(self, y, t, *theta):
-        #inp_signals = self.f_sym.get_input_signals(t)
-        try:
-            inp_signals = self.f_sym.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'f_x_theta interpolation error, time {t}')
-
+        inp_signals = self.get_inp_signals(t)
         return jnp.array(self.res_f_jax(*y, *inp_signals, *theta)[0].flatten())
         
     def dh_dx(self, state, t, theta):
-        #inp_signals = self.f_sym.get_input_signals(t)
-        try:
-            inp_signals = self.f_sym.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'dh_dx interpolation error, time {t}')
+        inp_signals = np.zeros(self.inp_signal_len) #self.get_inp_signals(t)
         return np.array(self.compute_jacobian_h_x(*[*state, *inp_signals, *theta]))
     
+    # def dh_dx_jax(self, state, t, theta):
+    #     inp_signals = self.get_inp_signals(t)
+    #     return np.array(self.compute_jacobian_h_x_jax(*[*state, *inp_signals, *theta])).squeeze()
+    
     def dh_dtheta(self, state, t, theta):
-        #inp_signals = self.f_sym.get_input_signals(t)
-        try:
-            inp_signals = self.f_sym.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'dh_dtheta interpolation error, time {t}')
-        return np.array(self.compute_jacobian_h_theta(*[*state, *inp_signals, *theta]))
+        inp_signals = np.zeros(self.inp_signal_len)#self.get_inp_signals(t)
+        return np.array(self.compute_jacobian_h_theta(*[*state, *inp_signals, *theta])).squeeze()
 
+    # def dh_dtheta_jax(self, state, t, theta):
+    #     inp_signals = self.get_inp_signals(t)
+    #     return np.array(self.compute_jacobian_h_theta_jax(*[*state, *inp_signals, *theta]))
+    
     def df_dtheta_jax(self, state, t, theta):
-        #inp_signals = self.f_sym.get_input_signals(t)
-        try:
-            inp_signals = self.f_sym.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'df_dtheta interpolation error, time {t}')
+        inp_signals = self.get_inp_signals(t)
         return jnp.array(self.compute_jacobian_theta_jax(*[*state, *inp_signals, *theta]))[0]
       
     def df_dtheta(self, state, t, theta):
-        #inp_signals = self.f_sym.get_input_signals(t)
-        try:
-            inp_signals = self.f_sym.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'df_dtheta interpolation error, time {t}')
+        inp_signals = self.get_inp_signals(t)
         return np.array(self.compute_jacobian_theta(*[*state, *inp_signals, *theta]))
 
 
     def df_dx(self, state, t, theta):
-        #inp_signals = self.f_sym.get_input_signals(t)
-        try:
-            inp_signals = self.f_sym.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'df_dx interpolation error, time {t}')
+        inp_signals = self.get_inp_signals(t)
         return np.array(self.compute_jacobian_x(*[*state, *inp_signals, *theta]))
     
     def df_dx_jax(self, state, t, theta):
-        #inp_signals = self.f_sym.get_input_signals(t)
-        try:
-            inp_signals = self.f_sym.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'df_dx interpolation error, time {t}')
+        inp_signals = self.get_inp_signals(t)
         return jnp.array(self.compute_jacobian_x_jax(*[*state, *inp_signals, *theta]))
     
     def get_jacobian_solution(self, c0, theta, t_eval1):
@@ -291,18 +266,34 @@ class MultipleShooting:
         self.N_shoot = N_shoot
         self.gamma = gamma
         self.state_measured_batches = []
+        self.state_full_batches = []
         self.t_eval_measurements_batches = []
         self.use_jax = use_jax
 
-    def add_batch(self, state_measured, t_eval_measurements):
+    def add_batch(self, state_full, state_measured, t_eval_measurements):
         self.state_measured_batches.append(state_measured)
+        self.state_full_batches.append(state_full)
         self.t_eval_measurements_batches.append(t_eval_measurements)
         
-    
     def get_time_interval(self, shoot, batch):
         time_manger = TimeIntervalManager(self.N_shoot, self.t_eval_measurements_batches[batch])
         return time_manger.get_time_interval(shoot)
     
+    def make_full_theta(self, theta0):
+        theta_full = np.copy(theta0)
+        for state_measured, state_full, t_eval_measurements in zip(self.state_measured_batches, self.state_full_batches, self.t_eval_measurements_batches):
+            N_measurement = len(t_eval_measurements)
+            measurement_indexes = np.arange(0, N_measurement, 1, dtype=int )
+            shoot_indexes = measurement_indexes[0:-1:int(len(measurement_indexes)/self.N_shoot)]
+            shoot_indexes = np.append(shoot_indexes, measurement_indexes[-1])
+            #N_shoot = len(shoot_indexes)
+            for i in range(len(shoot_indexes)-1):
+                id = shoot_indexes[i]
+                if(1):
+                    c0_ = state_full[id]
+                theta_full = np.concatenate((theta_full, c0_ ))
+        return theta_full
+
     def concantenate_jacobian(self, J1, J2):
         STATE_LENGTH, THETA_LENGTH, MEAS_LEN = self.system.get_dimentions()
         J2_theta = J2[:, :THETA_LENGTH]
@@ -312,12 +303,12 @@ class MultipleShooting:
         #zeros1 = np.zeros_like(J2_c0)
         return np.block([[J1, zeros1], [J2_theta, zeros2, J2_c0]])
     
-    def solve(self, variables):
+    def solve(self, theta_full):
         STATE_LENGTH, THETA_LENGTH, MEAS_LEN = self.system.get_dimentions()
         J = J_G = R = R_G = []
         for batch, (state_measured, t_eval_measurements) in enumerate(zip(self.state_measured_batches, self.t_eval_measurements_batches)):
             print(batch, "solve batch {batch}")
-            J_, J_G_, R_, R_G_ = self.solve_batch(variables, state_measured, t_eval_measurements, batch)
+            J_, J_G_, R_, R_G_ = self.solve_batch(theta_full, state_measured, t_eval_measurements, batch)
             if(len(J) == 0):
                 J = J_
                 J_G = J_G_
@@ -334,7 +325,7 @@ class MultipleShooting:
         R_big = np.concatenate((J.T@R, R_G))
         return H_big, R_big, np.linalg.norm(R)
 
-    def solve_batch(self, variables, state_measured, t_eval_measurements, batch):
+    def solve_batch(self, theta_full, state_measured, t_eval_measurements, batch):
         STATE_LENGTH, THETA_LENGTH, MEAS_LEN = self.system.get_dimentions()
         INDEX_THETA = range(0, STATE_LENGTH * THETA_LENGTH)
         INDEX_C = range(STATE_LENGTH * THETA_LENGTH, STATE_LENGTH * (THETA_LENGTH + STATE_LENGTH))
@@ -351,30 +342,32 @@ class MultipleShooting:
         Jc_prev = None
         state_prev = None
         for shoot in range(N_shoot):
-            c0 = variables[THETA_LENGTH + N_shoot * batch * STATE_LENGTH  + shoot * STATE_LENGTH: THETA_LENGTH + N_shoot * batch * STATE_LENGTH + (shoot + 1) * STATE_LENGTH]
+            c0 = theta_full[THETA_LENGTH + N_shoot * batch * STATE_LENGTH  + shoot * STATE_LENGTH: THETA_LENGTH + N_shoot * batch * STATE_LENGTH + (shoot + 1) * STATE_LENGTH]
             t_eval_curr_measur, measurement_indexes_curr = time_manger.get_time_interval(shoot)
+            start = tm_module.time()
             if(self.use_jax):
-                solution = self.system.get_jacobian_solution_jax(c0, variables[:THETA_LENGTH], t_eval_curr_measur)
+                solution = self.system.get_jacobian_solution_jax(c0, theta_full[:THETA_LENGTH], t_eval_curr_measur)
             else:
-                solution = self.system.get_jacobian_solution(c0, variables[:THETA_LENGTH], t_eval_curr_measur)
+                solution = self.system.get_jacobian_solution(c0, theta_full[:THETA_LENGTH], t_eval_curr_measur)
+            time_finish = tm_module.time() - start
+            #print("time_finish1",time_finish)
+            start = tm_module.time()
             J_raw = solution[STATE_LENGTH:]
             state_sample = solution[0:STATE_LENGTH]
             for i in range(len(measurement_indexes_curr)):
                 state = state_sample[:, i]
                 t = t_eval_curr_measur[i]
-                dh_dx =  self.system.dh_dx(state, t, variables[:THETA_LENGTH])
-                dh_dtheta =  self.system.dh_dtheta(state, t, variables[:THETA_LENGTH])
+                dh_dx =  self.system.dh_dx(state, t, theta_full[:THETA_LENGTH])
+                dh_dtheta =  self.system.dh_dtheta(state, t, theta_full[:THETA_LENGTH])
                 dx_dtheta = J_raw[INDEX_THETA, i].reshape(STATE_LENGTH, THETA_LENGTH)
                 dx_dc = J_raw[INDEX_C, i].reshape(STATE_LENGTH, STATE_LENGTH)
                 J_x = dh_dx@dx_dtheta + dh_dtheta
                 J_c = dh_dx@dx_dc
-                #print("J_x: ", J_x.shape, J_c.shape)
                 J[ind][:, :THETA_LENGTH] = J_x /len(measurement_indexes_curr)
                 J[ind][:, THETA_LENGTH + STATE_LENGTH * shoot : THETA_LENGTH + (STATE_LENGTH) * (shoot + 1)] = J_c/len(measurement_indexes_curr)
-                d = state_measured[ind] - self.system.h_x(state, t, variables[:THETA_LENGTH]) 
+                d = state_measured[ind] - self.system.h_x(state, t, theta_full[:THETA_LENGTH]) 
                 d*= self.gamma
-                R[ind]=  np.array(d)/len(measurement_indexes_curr)
-                #print(R[ind])
+                R[ind]=  np.array(d) / len(measurement_indexes_curr)
                 ind +=1
 
             if(shoot > 0):
@@ -383,7 +376,9 @@ class MultipleShooting:
                 J_G[shoot - 1][:, THETA_LENGTH + STATE_LENGTH * (shoot) : THETA_LENGTH + (STATE_LENGTH) * (shoot + 1)] = - np.eye(STATE_LENGTH)
                 R_G[shoot - 1] = -(state_prev - c0)
 
-
+            
+            time_finish = tm_module.time() - start
+            #print("time_finish2",time_finish)
             Jx_prev = J_raw[INDEX_THETA, -1].reshape(STATE_LENGTH, THETA_LENGTH)
             Jc_prev = J_raw[INDEX_C, -1].reshape(STATE_LENGTH, STATE_LENGTH) 
             state_raw = state_sample[:STATE_LENGTH]
@@ -408,20 +403,20 @@ class Regressor:
         J_h_theta = jacobian(h_observ, theta_var)
         self.compute_jacobian_h_theta = Function('J_h_x', [*inp_signal_var.elements(), *theta_var.elements()], [J_h_theta])
 
-    def h_x(self, t, theta):
+    def get_inp_signals(self, t):
         try:
-            inp_signals = self.system.get_input_signals(t)
+            inp_signals = self.f_sym.get_input_signals(t)
         except ValueError:
             inp_signals = np.zeros(self.inp_signal_len)
-            print(f'h_x interpolation error, time {t}')
+            print(f'df_dx interpolation error, time {t}')
+        return inp_signals
+    
+    def h_x(self, t, theta):
+        inp_signals = np.zeros(self.inp_signal_len) #self.get_inp_signals(t)
         return np.array(self.res_h(*[*inp_signals, *theta])).T[0]
     
     def dh_dtheta(self, t, theta):
-        try:
-            inp_signals = self.system.get_input_signals(t)
-        except ValueError:
-            inp_signals = np.zeros(self.inp_signal_len)
-            print(f'dh_dtheta interpolation error, time {t}')
+        inp_signals = np.zeros(self.inp_signal_len) #self.get_inp_signals(t)
         return np.array(self.compute_jacobian_h_theta(*[*inp_signals, *theta]))
     
     def solve(self, theta, state_measured, t_eval_measurements):
