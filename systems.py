@@ -3,6 +3,10 @@ from casadi import SX, vertcat
 import numpy as np
 from abc import ABC, abstractmethod
 import time
+import jax
+from jax import jit
+from jax import numpy as jnp
+
 class System:
     def __init__(self):
         pass
@@ -53,6 +57,8 @@ def get_interpolation_symbolic(x_grid, x, name='y_values'):
     return f_interp, y_values
 
 
+
+
 class Lateral_car_dynamic(System):
     def __init__(self, wheelbase = 2.65):
         super().__init__()
@@ -60,19 +66,34 @@ class Lateral_car_dynamic(System):
         self.wheelbase = wheelbase
 
     def get_system(self):
-        
         vy, wz = self.state
         delta, vx = SX.sym('delta'), SX.sym('vx')
         a0, a1, b0, b1 = SX.sym('a0'), SX.sym('a1'), SX.sym('b0'), SX.sym('b1')
-
+        GR = SX.sym('GR')
         alpha_f = np.atan2(vy  + self.wheelbase * wz, vx)
         alpha_r = np.atan2(vy , vx) #(vy )/ vx
-
-        vy_dot = a0 * (delta - alpha_f) +  a1 * alpha_r - vx * wz 
-        wz_dot = b0 * (delta - alpha_f) +  b1 * alpha_r
+        GR = 1
+        vy_dot = a0 * (delta*GR - alpha_f) +  a1 * alpha_r - vx * wz 
+        wz_dot = b0 * (delta*GR - alpha_f) +  b1 * alpha_r
 
         f = vertcat(vy_dot, wz_dot)
         return vertcat(vy, wz ), vertcat(delta, vx), vertcat(a0, a1, b0, b1), f
+    
+
+    # def get_system(self):
+        
+    #     vy, wz = self.state
+    #     delta, vx = SX.sym('delta'), SX.sym('vx')
+    #     a0, a1, b0, b1 = SX.sym('a0'), SX.sym('a1'), SX.sym('b0'), SX.sym('b1')
+    #     GR = SX.sym('GR')
+    #     alpha_f = np.atan2(vy  + self.wheelbase * wz, vx)
+    #     alpha_r = np.atan2(vy , vx) #(vy )/ vx
+
+    #     vy_dot = a0 * (delta*GR - alpha_f) +  a1 * alpha_r - vx * wz 
+    #     wz_dot = b0 * (delta*GR - alpha_f) +  b1 * alpha_r
+
+    #     f = vertcat(vy_dot, wz_dot)
+    #     return vertcat(vy, wz ), vertcat(delta, vx), vertcat(a0, a1, b0, b1, GR), f
     
     # def observation(self):
     #     vy, wz = self.state

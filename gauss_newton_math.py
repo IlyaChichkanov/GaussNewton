@@ -5,7 +5,6 @@ from systems import System
 from jaxadi import convert
 from jax import numpy as jnp
 from jax.experimental.ode import odeint
-from jax import jit
 from casadi import SX, vertcat, jacobian, Function
 import casadi as ca
 import time as tm_module
@@ -24,15 +23,15 @@ class SystemJacobian:
         self.res_f_jax = convert(self.res_f, compile = True) 
 
         self.res_h = Function('h_x', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [h_observ])
-        self.res_h_jax = convert(Function('h_x', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [h_observ]), compile = True) 
+        #self.res_h_jax = convert(Function('h_x', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [h_observ]), compile = True) 
 
         J_h_x = jacobian(h_observ, vertcat(*[*state_var.elements()]))
         self.compute_jacobian_h_x = Function('J_h_x', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [J_h_x])
-        self.compute_jacobian_h_x_jax = convert(self.compute_jacobian_h_x, compile = True) 
+        #self.compute_jacobian_h_x_jax = convert(self.compute_jacobian_h_x, compile = True) 
 
         J_h_theta = jacobian(h_observ, vertcat(*[*theta_var.elements()]))
         self.compute_jacobian_h_theta = Function('J_h_theta', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [J_h_theta])
-        self.compute_jacobian_h_theta_jax =convert(self.compute_jacobian_h_theta, compile = True) 
+        #self.compute_jacobian_h_theta_jax =convert(self.compute_jacobian_h_theta, compile = True) 
 
         J_p = jacobian(f, vertcat(*[*theta_var.elements()]))
         self.compute_jacobian_theta = Function('J_p', [*state_var.elements(), *inp_signal_var.elements(), *theta_var.elements()], [J_p])
@@ -201,41 +200,6 @@ class SystemJacobian:
                                  self.JacobianX_jax(state, t, theta), self.JacobianC_jax(state, t, theta)))
         return dstate
 
-
-class AdamOptimizer:
-    def __init__(self, learning_rate=0.001, beta1=0.9, beta2=0.999, epsilon=1e-8):
-        self.learning_rate = learning_rate
-        self.beta1 = beta1
-        self.beta2 = beta2
-        self.epsilon = epsilon
-        self.m = None  # Первый момент (среднее)
-        self.v = None  # Второй момент (нецентрированная дисперсия)
-        self.t = 0     # Счетчик итераций
-
-    def update(self, params, grads):
-        if self.m is None:
-            self.m = [np.zeros_like(param) for param in params]
-            self.v = [np.zeros_like(param) for param in params]
-
-        self.t += 1
-        updates = []
-
-        for i, (param, grad) in enumerate(zip(params, grads)):
-            # Обновляем оценки первого и второго моментов
-            self.m[i] = self.beta1 * self.m[i] + (1 - self.beta1) * grad
-            self.v[i] = self.beta2 * self.v[i] + (1 - self.beta2) * (grad ** 2)
-
-            # Коррекция смещения (bias correction)
-            m_hat = self.m[i] / (1 - self.beta1 ** self.t)
-            v_hat = self.v[i] / (1 - self.beta2 ** self.t)
-
-            # Обновление параметров
-            param_update = self.learning_rate * m_hat / (np.sqrt(v_hat) + self.epsilon)
-            #param -= grad#param_update
-            param -= param_update
-            updates.append(param)
-
-        return param
     
 
 class TimeIntervalManager:
@@ -286,7 +250,6 @@ class MultipleShooting:
             measurement_indexes = np.arange(0, N_measurement, 1, dtype=int )
             shoot_indexes = measurement_indexes[0:-1:int(len(measurement_indexes)/self.N_shoot)]
             shoot_indexes = np.append(shoot_indexes, measurement_indexes[-1])
-            #N_shoot = len(shoot_indexes)
             for i in range(len(shoot_indexes)-1):
                 id = shoot_indexes[i]
                 if(1):
@@ -304,7 +267,6 @@ class MultipleShooting:
         return np.block([[J1, zeros1], [J2_theta, zeros2, J2_c0]])
     
     def solve(self, theta_full):
-        STATE_LENGTH, THETA_LENGTH, MEAS_LEN = self.system.get_dimentions()
         J = J_G = R = R_G = []
         for batch, (state_measured, t_eval_measurements) in enumerate(zip(self.state_measured_batches, self.t_eval_measurements_batches)):
             print(batch, "solve batch {batch}")
@@ -320,10 +282,9 @@ class MultipleShooting:
                 R = np.hstack((R, R_))
                 R_G = np.hstack((R_G, R_G_))
 
-        H = J.T@J   
-        H_big = np.block([[H, J_G.T], [J_G, np.zeros((J_G.shape[0], J_G.shape[0]))]])
-        R_big = np.concatenate((J.T@R, R_G))
-        return H_big, R_big, np.linalg.norm(R)
+
+        return J, R, J_G, R_G
+
 
     def solve_batch(self, theta_full, state_measured, t_eval_measurements, batch):
         STATE_LENGTH, THETA_LENGTH, MEAS_LEN = self.system.get_dimentions()
@@ -430,3 +391,4 @@ class Regressor:
         J = J.reshape(N_measurement * self.meas_len, -1)
         R = R.reshape(N_measurement * self.meas_len)
         return J, R
+    
