@@ -11,6 +11,7 @@ import time as tm_module
 ATOL = 1e-5
 RTOL = 1e-5
 
+
 class SystemJacobian:
     def __init__(self, f_sym: System, method: str =  'RK45'):
         self.f_sym = f_sym
@@ -201,7 +202,28 @@ class SystemJacobian:
         return dstate
 
     
+class Constrainth:
+    def __init__(self, coefs):
+        self.G = []
+        self.h = []
+        self.coefs = coefs
 
+    def add(self, index, min_val, max_val):
+        G_new = np.zeros((2, len(self.coefs)))
+        G_new[0][index] = -1
+        G_new[1][index] = 1
+        h_new = np.zeros(2)
+        h_new[0] = -(min_val - self.coefs[index])
+        h_new[1] = (max_val - self.coefs[index])
+        if(len(self.G)):
+            self.G = np.vstack((self.G, G_new))
+            self.h = np.hstack((self.h, h_new))
+        else:
+            self.G = G_new
+            self.h = h_new
+
+    def get_matrix(self):
+        return self.G, self.h
 class TimeIntervalManager:
     def __init__(self, N_shoot, t_eval_measurements):
         self.t_eval_measurements = t_eval_measurements

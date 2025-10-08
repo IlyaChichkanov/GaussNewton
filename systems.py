@@ -201,7 +201,7 @@ class LateralSemiDynamic(System):
         w_dot = y
         y_dot = T * (K * delta - w) - D * y
         f = vertcat(psi_dot, w_dot, y_dot)
-        return [psi, w, y],[delta], [T, D ], f
+        return [psi, w, y], [delta], [T, D ], f
     
     def get_input_signals(self, t):
         return [(0.1 + 0.09 * t) * np.sin(0.9 *t)]
