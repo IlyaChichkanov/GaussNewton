@@ -247,7 +247,7 @@ class TimeIntervalManager:
     
 
 class MultipleShooting:
-    def __init__(self, system: SystemJacobian, N_shoot: int, gamma: np.array, use_jax = False):
+    def __init__(self, system: SystemJacobian, N_shoot: int, gamma: np.array = np.nan, c0_cost = 1, use_jax = False):
         self.system = system
         self.N_shoot = N_shoot
         self.gamma = gamma
@@ -255,7 +255,9 @@ class MultipleShooting:
         self.state_full_batches = []
         self.t_eval_measurements_batches = []
         self.use_jax = use_jax
-
+        self.c0_cost = c0_cost
+        self.full_trajectory = None
+        
     def add_batch(self, state_full, state_measured, t_eval_measurements):
         self.state_measured_batches.append(state_measured)
         self.state_full_batches.append(state_full)
@@ -304,7 +306,6 @@ class MultipleShooting:
                 R = np.hstack((R, R_))
                 R_G = np.hstack((R_G, R_G_))
 
-
         return J, R, J_G, R_G
 
 
@@ -337,6 +338,7 @@ class MultipleShooting:
             start = tm_module.time()
             J_raw = solution[STATE_LENGTH:]
             state_sample = solution[0:STATE_LENGTH]
+            first_point = True
             for i in range(len(measurement_indexes_curr)):
                 state = state_sample[:, i]
                 t = t_eval_curr_measur[i]
@@ -349,8 +351,14 @@ class MultipleShooting:
                 J[ind][:, :THETA_LENGTH] = J_x /len(measurement_indexes_curr)
                 J[ind][:, THETA_LENGTH + STATE_LENGTH * shoot : THETA_LENGTH + (STATE_LENGTH) * (shoot + 1)] = J_c/len(measurement_indexes_curr)
                 d = state_measured[ind] - self.system.h_x(state, t, theta_full[:THETA_LENGTH]) 
-                d*= self.gamma
                 R[ind]=  np.array(d) / len(measurement_indexes_curr)
+                if(np.any(~np.isnan(self.gamma))):
+                    R[ind] *= self.gamma
+                    J[ind] *= self.gamma[:, np.newaxis]
+                    if(first_point):
+                         R[ind] *= self.c0_cost
+                         J[ind] *= self.c0_cost
+                first_point = False
                 ind +=1
 
             if(shoot > 0):
@@ -358,7 +366,10 @@ class MultipleShooting:
                 J_G[shoot - 1][:, THETA_LENGTH + STATE_LENGTH * (shoot -1) : THETA_LENGTH + STATE_LENGTH * (shoot)] = Jc_prev
                 J_G[shoot - 1][:, THETA_LENGTH + STATE_LENGTH * (shoot) : THETA_LENGTH + (STATE_LENGTH) * (shoot + 1)] = - np.eye(STATE_LENGTH)
                 R_G[shoot - 1] = -(state_prev - c0)
-
+                if(np.any(~np.isnan(self.gamma))):
+                    R[ind] *= self.gamma
+                    J[ind] *= self.gamma[:, np.newaxis]
+                
             
             time_finish = tm_module.time() - start
             #print("time_finish2",time_finish)
@@ -388,18 +399,18 @@ class Regressor:
 
     def get_inp_signals(self, t):
         try:
-            inp_signals = self.f_sym.get_input_signals(t)
+            inp_signals = self.system.get_input_signals(t)
         except ValueError:
             inp_signals = np.zeros(self.inp_signal_len)
             print(f'df_dx interpolation error, time {t}')
         return inp_signals
     
     def h_x(self, t, theta):
-        inp_signals = np.zeros(self.inp_signal_len) #self.get_inp_signals(t)
+        inp_signals = self.get_inp_signals(t)
         return np.array(self.res_h(*[*inp_signals, *theta])).T[0]
     
     def dh_dtheta(self, t, theta):
-        inp_signals = np.zeros(self.inp_signal_len) #self.get_inp_signals(t)
+        inp_signals = self.get_inp_signals(t)
         return np.array(self.compute_jacobian_h_theta(*[*inp_signals, *theta]))
     
     def solve(self, theta, state_measured, t_eval_measurements):

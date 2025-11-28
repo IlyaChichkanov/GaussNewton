@@ -70,11 +70,13 @@ class Lateral_car_dynamic(System):
         delta, vx = SX.sym('delta'), SX.sym('vx')
         a0, a1, b0, b1 = SX.sym('a0'), SX.sym('a1'), SX.sym('b0'), SX.sym('b1')
         GR = SX.sym('GR')
+        offset = SX.sym('offset')
         alpha_f = np.atan2(vy  + self.wheelbase * wz, vx)
         alpha_r = np.atan2(vy , vx) #(vy )/ vx
         GR = 1
-        vy_dot = a0 * (delta*GR - alpha_f) +  a1 * alpha_r - vx * wz 
-        wz_dot = b0 * (delta*GR - alpha_f) +  b1 * alpha_r
+        offset  = 0.0
+        vy_dot = a0 * ((delta + offset)*GR - alpha_f) +  a1 * alpha_r - vx * wz 
+        wz_dot = b0 * ((delta + offset)*GR - alpha_f) +  b1 * alpha_r
 
         f = vertcat(vy_dot, wz_dot)
         return vertcat(vy, wz ), vertcat(delta, vx), vertcat(a0, a1, b0, b1), f
@@ -174,16 +176,16 @@ class Attractor(System):
     def get_system(self):
         x, y, z = self.state
         alpha, beta, gamma = SX.sym('alpha'), SX.sym('beta'), SX.sym('gamma')
-        dx_dt = alpha * (x - y)
+        dx_dt = alpha * (y-x)
         dy_dt =  x * (beta - z) - y
         dz_dt =  x * y - gamma * z
         f = vertcat(dx_dt, dy_dt, dz_dt)
-        return vertcat(x, y, z), [],vertcat(alpha, beta, gamma), f
+        return vertcat(x, y, z), vertcat(),vertcat(alpha, beta, gamma), f
     
     def observation(self):
         x, y, z = self.state
         #observed = vertcat(np.sqrt(x**2 + y**2 + ), x/y)
-        observed = vertcat(x, z)
+        observed = vertcat(x,y, z)
         return observed
 
 
