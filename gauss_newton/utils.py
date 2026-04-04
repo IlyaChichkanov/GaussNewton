@@ -20,8 +20,9 @@ def plot_solution(
     plot_residuals: bool = False,
     r_meas_hist: Optional[np.ndarray] = None,
     r_cont_hist: Optional[np.ndarray] = None,
-    index: int = -1,
-    theta_true: Optional[np.ndarray] = None
+    index=-1, theta_true=None,
+    ci_low_hist=None, ci_high_hist=None,   # новые параметры
+    param_names=None
 ) -> None:
     """
     Визуализация результатов multiple shooting.
@@ -89,6 +90,7 @@ def plot_solution(
         ax_theta.grid(True)
         plt.setp(ax_theta.get_xticklabels(), fontsize=fontsize)
         plt.setp(ax_theta.get_yticklabels(), fontsize=fontsize)
+
 
     # ---- 5. Ось для невязок ----
     if plot_residuals:
@@ -178,31 +180,45 @@ def plot_solution(
         if state_full.shape[1] >= 2:
             if use_3d and state_full.shape[1] >= 3:
                 ax_traj.scatter(state_full[:, 0], state_full[:, 1], state_full[:, 2],
-                                color='green', marker='x', s=10)
+                                color='green', label='Measurements', marker='x', s=15)
             else:
                 ax_traj.scatter(state_full[:, 0], state_full[:, 1],
-                    color='green', marker='x', s=10,
+                    color='green', marker='x', s=15,
                     label='Measurements' if batch == 0 else "")
 
         # Временные ряды измерений
         if plot_xy:
             for state_idx in range(n_state):
                 axes_states[state_idx][batch].scatter(t_meas, state_full[:, state_idx],
-                                                      color='green', marker='x', s=10)
+                                                      color='green', marker='x', s=15)
 
     # Легенда для фазовой траектории
     ax_traj.legend(fontsize=fontsize)
 
-    # ---- График сходимости параметров ----
+    # ---- График сходимости параметров и доверительные интервалы ----
     if plot_theta:
-        theta_history = np.array(theta_hist)[:index+1, :n_theta]
+        theta_history = np.array(theta_hist)[:index+1, :n_theta]   # (n_iter, n_theta)
         colors = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
         for i in range(theta_history.shape[1]):
             color = colors[i % len(colors)]
             if theta_true is not None and i < len(theta_true):
                 ax_theta.axhline(y=theta_true[i], linestyle='--', color=color, alpha=0.7)
+            
+            # Рисуем доверительный интервал (закрашенная область)
+            if ci_low_hist is not None and ci_high_hist is not None:
+                # ci_low_hist, ci_high_hist имеют форму (n_iter, n_theta)
+                # Берём историю для текущего параметра i (до индекса index)
+                low = ci_low_hist[:index+1, i]
+                high = ci_high_hist[:index+1, i]
+                x = np.arange(len(low))
+                ax_theta.fill_between(x, low, high, color=color, alpha=0.2)
+                # Опционально: сплошные линии границ
+                # ax_theta.plot(x, low, '--', color=color, alpha=0.5)
+                # ax_theta.plot(x, high, '--', color=color, alpha=0.5)
+            
+            # Рисуем оценку параметра
             ax_theta.step(range(len(theta_history)), theta_history[:, i],
-                          where='post', color=color, label=f'$\\theta_{i}$')
+                        where='post', color=color, label=f'$\\theta_{i}$')
         ax_theta.legend(fontsize=fontsize)
 
     plt.tight_layout()

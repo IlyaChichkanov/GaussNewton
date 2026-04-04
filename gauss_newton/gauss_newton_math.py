@@ -2,9 +2,6 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from commom_utils.ode_system import ODESystem, SystemJacobian
 import casadi as ca
-ATOL = 1e-5
-RTOL = 1e-5
-
 
 
 class TimeIntervalManager:
