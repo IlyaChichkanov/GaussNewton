@@ -18,6 +18,7 @@ def plot_solution(
     plot_theta: bool = True,
     plot_true_solution: bool = False,
     plot_residuals: bool = False,
+    plot_measurements: bool = False, 
     r_meas_hist: Optional[np.ndarray] = None,
     r_cont_hist: Optional[np.ndarray] = None,
     index=-1, theta_true=None,
@@ -143,8 +144,8 @@ def plot_solution(
             _plot_traj(ax_traj, state_true, use_3d, color='grey', label='True solution')
 
     # ---- Основной цикл по батчам и шутам (отрисовка оценённых траекторий) ----
-    for batch, (state_full, state_measured, t_meas) in enumerate(
-        zip(problem.state_full_batches, problem.state_measured_batches, problem.t_eval_measurements_batches)
+    for batch, (state_measured, t_meas) in enumerate(
+        zip(problem.state_measured_batches, problem.t_eval_measurements_batches)
     ):
         print(f'batch {batch}')
 
@@ -174,6 +175,25 @@ def plot_solution(
                 for state_idx in range(n_state):
                     axes_states[state_idx][batch].plot(t_dense, traj[:, state_idx],
                                                        'b-', alpha=0.7)
+
+        # ---- Измерения (зелёные крестики) ----
+        # Фазовая плоскость
+        if(plot_measurements):
+            if state_measured.shape[1] >= 2:
+                if use_3d and state_measured.shape[1] >= 3:
+                    ax_traj.scatter(state_measured[:, 0], state_measured[:, 1], state_measured[:, 2],
+                                    color='green', label='Measurements', marker='x', s=15)
+                else:
+                    ax_traj.scatter(state_measured[:, 0], state_measured[:, 1],
+                        color='green', marker='x', s=15,
+                        label='Measurements' if batch == 0 else "")
+
+            #Временные ряды измерений
+            if plot_xy:
+                for state_idx in range(n_state):
+                    axes_states[state_idx][batch].scatter(t_meas, state_measured[:, state_idx],
+                                                        color='green', marker='x', s=15)
+
 
         # ---- Измерения (зелёные крестики) ----
         # # Фазовая плоскость
