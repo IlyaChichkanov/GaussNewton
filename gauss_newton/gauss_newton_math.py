@@ -57,7 +57,7 @@ class MultipleShooting:
         tm = TimeIntervalManager(self.N_shoot, self.t_eval_measurements_batches[batch])
         return tm.get_time_interval(shoot)
 
-    def make_full_theta(self, theta0):
+    def make_full_theta_from_true(self, theta0):
         """
         Build the full parameter vector (theta + initial conditions for all shoots).
         """
@@ -70,7 +70,50 @@ class MultipleShooting:
             shoot_idx = np.append(shoot_idx, meas_idx[-1])
             for i in range(len(shoot_idx) - 1):
                 id_ = shoot_idx[i]
-                c0_ = state_full[id_]   # initial guess from the provided full state
+                c0_ = state_full[id_] #TODO  # initial guess from the provided full state  
+                theta_full = np.concatenate((theta_full, c0_))
+        return theta_full
+
+    def make_full_theta(self, theta0, c0_guess = np.nan, c0_init_method='inverse_h', n_iter=1):
+        """
+        Build the full parameter vector (theta + initial conditions for all shoots).
+        Initial guesses for c0 are computed from measurements using the system's inverse_h method.
+        
+        Parameters:
+            theta0: initial parameters (theta_len,)
+            c0_init_method: 'zeros', 'inverse_h' (default), or 'measurement_pad'
+            n_iter: number of iterations for inverse_h (if used)
+        """
+        theta_full = np.copy(theta0)
+        n_state = self.system.nx
+        
+        for state_measured, t_meas in zip(self.state_measured_batches, self.t_eval_measurements_batches):
+            n_meas = len(t_meas)
+            meas_idx = np.arange(n_meas, dtype=int)
+            shoot_idx = meas_idx[0:-1:int(len(meas_idx) / self.N_shoot)]
+            shoot_idx = np.append(shoot_idx, meas_idx[-1])
+            
+            for i in range(len(shoot_idx) - 1):
+                idx = shoot_idx[i]
+                y_first = state_measured[idx]
+                t_first = t_meas[idx]
+                
+                if c0_init_method == 'zeros':
+                    c0_ = np.zeros(n_state)
+                elif c0_init_method == 'measurement_pad':
+                    # Прямое копирование (игнорируя нелинейность)
+                    c0_ = np.zeros(n_state)
+                    c0_[:len(y_first)] = y_first
+                elif c0_init_method == 'inverse_h':
+                    # Приближённое обращение h
+                    # Начальное приближение для x можно взять нулевым
+                    if(np.isnan(c0_guess).any()):
+                        c0_guess = np.zeros(n_state)
+                    c0_ = self.system.inverse_h(y_first, t_first, theta0, 
+                                                x_guess=c0_guess, n_iter=n_iter)
+                else:
+                    raise ValueError(f"Unknown c0_init_method: {c0_init_method}")
+                
                 theta_full = np.concatenate((theta_full, c0_))
         return theta_full
 
@@ -204,8 +247,11 @@ class MultipleShooting:
         # Flatten the arrays
         J_flat = J.reshape(n_measurements * n_meas, -1)
         R_flat = R.reshape(n_measurements * n_meas)
-        J_G_flat = J_G.reshape((n_shoot - 1) * n_state, -1)
-        R_G_flat = R_G.reshape((n_shoot - 1) * n_state)
+        J_G_flat = np.array([])
+        R_G_flat = np.array([])
+        if shoot > 0:
+            J_G_flat = J_G.reshape((n_shoot - 1) * n_state, -1)
+            R_G_flat = R_G.reshape((n_shoot - 1) * n_state)
 
         return J_flat, J_G_flat, R_flat, R_G_flat
 

@@ -9,15 +9,6 @@ from abc import ABC, abstractmethod
 from jaxadi import convert
 
 
-ATOL = 1e-5
-RTOL = 1e-5
-
-
-
-
-
-
-
 
 class ODESystem:
     def __init__(self, nx, np, nu):
@@ -27,6 +18,7 @@ class ODESystem:
         self.state = ca.SX.sym("x", nx)
         self.theta = ca.SX.sym("theta", np)
         self.u = ca.SX.sym("u", nu)
+        self.n_obs = self.observation(self.state).shape[0]
 
     @abstractmethod
     def get_derivative(self, state: SX, theta: SX, u: SX) -> SX:
@@ -36,6 +28,7 @@ class ODESystem:
         f = self.get_derivative(self.state, self.theta, self.u)
         return self.state, self.u, self.theta, f
     
+    @abstractmethod
     def observation(self):
         observed = self.state
         return observed
@@ -55,6 +48,8 @@ class SystemJacobian:
         f_sym: объект System, предоставляющий символьное описание модели.
         method: метод интегрирования для solve_ivp (например, 'RK45').
         """
+        self.ATOL = 1e-5
+        self.RTOL = 1e-5
         self.f_sym = f_sym
         self.method = method
 
@@ -68,9 +63,9 @@ class SystemJacobian:
         theta_list = theta_var.elements()
 
         self.inp_signal_len = len(inp_list)
-        self.STATE_LENGTH = len(state_list)
-        self.THETA_LENGTH = len(theta_list)
-        self.MEAS_LENGTH = len(h_observ.elements())
+        self.nx = len(state_list)
+        self.n_p = len(theta_list)
+        self.n_obs = len(h_observ.elements())
 
         # --- Создание CasADi функций ---
         self.res_f = Function('func', [*state_list, *inp_list, *theta_list], [f])
@@ -94,8 +89,8 @@ class SystemJacobian:
         self.compute_jacobian_x_jax = convert(Function('J_x', [*state_list, *inp_list, *theta_list], [J_x]), compile=True)
 
         # Константы для индексации расширенного состояния (чувствительности)
-        self._IDX_JX = slice(self.STATE_LENGTH, self.STATE_LENGTH + self.STATE_LENGTH * self.THETA_LENGTH)
-        self._IDX_JC = slice(self._IDX_JX.stop, self._IDX_JX.stop + self.STATE_LENGTH * self.STATE_LENGTH)
+        self._IDX_JX = slice(self.nx, self.nx + self.nx * self.n_p)
+        self._IDX_JC = slice(self._IDX_JX.stop, self._IDX_JX.stop + self.nx * self.nx)
 
     # ----------------------------------------------------------------------
     # Вспомогательные методы
@@ -110,7 +105,7 @@ class SystemJacobian:
 
     def get_dimentions(self):
         """Возвращает размерности: (state_len, theta_len, meas_len)."""
-        return self.STATE_LENGTH, self.THETA_LENGTH, self.MEAS_LENGTH
+        return self.nx, self.n_p, self.n_obs
 
     # ----------------------------------------------------------------------
     # Методы для обычного режима (NumPy)
@@ -119,6 +114,31 @@ class SystemJacobian:
         """Вычисляет выход системы в момент t."""
         inp = self._get_inp_signals(t)
         return np.array(self.res_h(*state, *inp, *theta)).flatten()
+
+    def inverse_h(self, y, t, theta, x_guess=None, n_iter=1):
+        """
+        Приближённо решает уравнение h(x, theta) = y относительно x.
+        Параметры:
+            y: измерение (meas_len,)
+            t: время
+            theta: параметры (theta_len,)
+            x_guess: начальное приближение (state_len,). Если None, то нули.
+            n_iter: число итераций Гаусса–Ньютона (обычно 1-2).
+        Возвращает:
+            x: оценка состояния (state_len,)
+        """
+        if x_guess is None:
+            x_guess = np.zeros(self.nx)
+        
+        x = x_guess.copy()
+        for _ in range(n_iter):
+            dh_dx = self.dh_dx(x, t, theta)        # (meas_len, state_len)
+            h_val = self.h_x(x, t, theta)          # (meas_len,)
+            residual = y - h_val
+            # Решаем линейную систему (least squares)
+            delta_x = np.linalg.lstsq(dh_dx, residual, rcond=None)[0]
+            x = x + delta_x
+        return x
 
     def f_x_theta(self, state, t, theta):
         """Вычисляет правую часть системы в момент t."""
@@ -169,19 +189,19 @@ class SystemJacobian:
     def get_solution(self, c0, theta, t_eval):
         """Интегрирование только состояния (обычный режим)."""
         def system(t, y):
-            return self.f_x_theta(y, t, theta[:self.THETA_LENGTH])
+            return self.f_x_theta(y, t, theta[:self.n_p])
 
         sol = solve_ivp(system, (t_eval[0], t_eval[-1]), c0,
                         t_eval=t_eval, method=self.method,
-                        atol=ATOL, rtol=RTOL)
+                        atol=self.ATOL, rtol=self.RTOL)
         if not sol.success:
             raise RuntimeError(f"Интегрирование не сошлось: {sol.message}")
         return sol.y
 
     def get_jacobian_solution(self, c0, theta, t_eval):
         """Интегрирование расширенной системы (состояние + чувствительности) (обычный режим)."""
-        n = self.STATE_LENGTH
-        p = self.THETA_LENGTH
+        n = self.nx
+        p = self.n_p
 
         J0 = np.concatenate([np.zeros((n, p)).flatten(), np.eye(n).flatten()])
         y0 = np.concatenate([c0, J0])
@@ -199,7 +219,7 @@ class SystemJacobian:
 
         sol = solve_ivp(full_ode, (t_eval[0], t_eval[-1]), y0,
                         t_eval=t_eval, method=self.method,
-                        atol=ATOL, rtol=RTOL)
+                        atol=self.ATOL, rtol=self.RTOL)
         if not sol.success:
             raise RuntimeError(f"Интегрирование чувствительности не сошлось: {sol.message}")
         return sol.y
@@ -212,13 +232,13 @@ class SystemJacobian:
         sol = odeint(self.f_x_theta_jax,
                      jnp.array(c0),
                      jnp.array(t_eval),
-                     *theta[:self.THETA_LENGTH])
+                     *theta[:self.n_p])
         return np.array(sol).T
 
     def get_jacobian_solution_jax(self, c0, theta, t_eval):
         """JAX-интегрирование расширенной системы (состояние + чувствительности)."""
-        n = self.STATE_LENGTH
-        p = self.THETA_LENGTH
+        n = self.nx
+        p = self.n_p
 
         J0 = jnp.concatenate([jnp.zeros((n, p)).flatten(), jnp.eye(n).flatten()])
         y0 = jnp.concatenate([jnp.array(c0), J0])
@@ -231,21 +251,21 @@ class SystemJacobian:
     # ----------------------------------------------------------------------
     def _jacobian_x(self, state, t, theta):
         """Вычисляет производную матрицы Jx (чувствительности по параметрам)."""
-        x = state[:self.STATE_LENGTH]
-        Jx = state[self._IDX_JX].reshape((self.STATE_LENGTH, self.THETA_LENGTH))
+        x = state[:self.nx]
+        Jx = state[self._IDX_JX].reshape((self.nx, self.n_p))
         dJx = self.df_dx(x, t, theta) @ Jx + self.df_dtheta(x, t, theta)
         return dJx.flatten()
 
     def _jacobian_c(self, state, t, theta):
         """Вычисляет производную матрицы Jc (чувствительности по начальным условиям)."""
-        x = state[:self.STATE_LENGTH]
-        Jc = state[self._IDX_JC].reshape((self.STATE_LENGTH, self.STATE_LENGTH))
+        x = state[:self.nx]
+        Jc = state[self._IDX_JC].reshape((self.nx, self.nx))
         dJc = self.df_dx(x, t, theta) @ Jc
         return dJc.flatten()
 
     def make_full_system(self, state, t, theta):
         """Расширенная система для обычного режима."""
-        x = state[:self.STATE_LENGTH]
+        x = state[:self.nx]
         dx = self.f_x_theta(x, t, theta)
         dJx = self._jacobian_x(state, t, theta)
         dJc = self._jacobian_c(state, t, theta)
@@ -253,21 +273,21 @@ class SystemJacobian:
 
     def _jacobian_x_jax(self, state, t, theta):
         """JAX-версия производной Jx."""
-        x = state[:self.STATE_LENGTH]
-        Jx = state[self._IDX_JX].reshape((self.STATE_LENGTH, self.THETA_LENGTH))
+        x = state[:self.nx]
+        Jx = state[self._IDX_JX].reshape((self.nx, self.n_p))
         dJx = self.df_dx_jax(x, t, theta) @ Jx + self.df_dtheta_jax(x, t, theta)
         return dJx.flatten()
 
     def _jacobian_c_jax(self, state, t, theta):
         """JAX-версия производной Jc."""
-        x = state[:self.STATE_LENGTH]
-        Jc = state[self._IDX_JC].reshape((self.STATE_LENGTH, self.STATE_LENGTH))
+        x = state[:self.nx]
+        Jc = state[self._IDX_JC].reshape((self.nx, self.nx))
         dJc = self.df_dx_jax(x, t, theta) @ Jc
         return dJc.flatten()
 
     def make_full_system_jax(self, state, t, *theta):
         """JAX-версия расширенной системы."""
-        x = state[:self.STATE_LENGTH]
+        x = state[:self.nx]
         dx = self.f_x_theta_jax(x, t, *theta)
         dJx = self._jacobian_x_jax(state, t, theta)
         dJc = self._jacobian_c_jax(state, t, theta)
