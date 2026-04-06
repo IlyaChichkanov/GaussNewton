@@ -259,3 +259,117 @@ class MultipleShooting:
     def concantenate_jacobian(self, J1, J2):
         """Alias for _concatenate_jacobians (maintains original method name)."""
         return self._concatenate_jacobians(J1, J2)
+    
+
+
+
+# ---------- Функции для ковариации и доверительных интервалов ----------
+def compute_parameter_covariance(J, R, J_G, R_G, theta_full):
+    """Вычисляет ковариационную матрицу для всех оцениваемых параметров."""
+    J_full = J
+    R_full = R
+    multiple_shooting = len(J_G) > 0
+    if(multiple_shooting):
+        J_full = np.vstack([J, J_G])
+        R_full = np.hstack([R, R_G])
+    residual_sum_squares = R_full @ R_full
+    n_meas = J.shape[0]
+    n_cont = J_G.shape[0]
+    n_params = len(theta_full)
+    dof = n_meas + n_cont - n_params
+    if dof <= 0:
+        raise ValueError(f"Недостаточно данных для оценки ковариации (dof={dof})")
+    sigma2 = residual_sum_squares / dof
+    H = J_full.T @ J_full
+    H_reg = H + 1e-8 * np.eye(n_params)   # регуляризация для устойчивости
+    try:
+        cov = sigma2 * np.linalg.inv(H_reg)
+    except np.linalg.LinAlgError:
+        cov = sigma2 * np.linalg.pinv(H_reg)
+    return cov, sigma2
+
+def confidence_intervals(theta_opt, cov, dof, alpha=0.05):
+    """Возвращает (нижние_границы, верхние_границы) для каждого параметра."""
+    from scipy import stats   # <-- добавил для t-критерия
+    se = np.sqrt(np.diag(cov))
+    t_crit = stats.t.ppf(1 - alpha/2, df=dof)
+    ci_low = theta_opt - t_crit * se
+    ci_high = theta_opt + t_crit * se
+    return ci_low, ci_high
+
+# ---------- Вычисление шага (ваш работающий метод) ----------
+def compute_delta_gn(J, R, J_G, R_G, mu, lambda_, lambda_reg, theta_full, iter_num):
+    J_full = J
+    R_full = R
+    multiple_shooting = len(J_G) > 0
+
+    if multiple_shooting:
+        H = J.T @ J
+        H_full = np.block([[H, J_G.T],
+                           [J_G, -mu * np.eye(J_G.shape[0])]])
+        R_full = np.concatenate((J.T @ R, R_G))
+        k = J.shape[1]
+        I_reg = np.zeros(H_full.shape)
+        I_reg[:k, :k] = np.eye(k)
+        H_reg = H_full + lambda_reg * I_reg + lambda_ * np.diag(np.diag(H_full))
+        delta = np.linalg.solve(H_reg, R_full)
+        delta_theta = delta[:len(theta_full)]
+        new_mu = mu / 2
+    else:
+        J_full = J
+        R_full = R
+        H_full = J_full.T @ J_full
+        H_reg = H_full + 1e-8 * np.eye(H_full.shape[0])
+        delta_full = np.linalg.solve(H_reg, J_full.T @ R_full)
+        delta_theta = delta_full[:len(theta_full)]
+        new_mu = mu
+    return delta_theta, new_mu
+
+# ---------- Запуск оптимизации с вычислением ковариации ----------
+def run_optimization(problem, config, theta_full, system):
+    import time
+    theta_hist = [theta_full[:].copy()]
+    r_meas_hist = []
+    r_cont_hist = []
+    
+    # --- ДОБАВЛЯЕМ списки для истории доверительных интервалов ---
+    ci_low_hist = []   # каждый элемент: массив длины n_theta
+    ci_high_hist = []
+
+    mu = config.mu
+    n_theta = system.np   # число исходных параметров
+
+    for it in range(config.n_iter):
+        start = time.time()
+        J, R, J_G, R_G = problem.solve(theta_full)
+        elapsed = time.time() - start
+
+        meas_cost = system.nx * np.sum(R**2) / len(R)
+        cont_cost = system.nx * np.sum(R_G**2) / len(R_G)
+        print(f'Iter {it:3d} | time: {elapsed:.3f}s | R_meas: {meas_cost:.3e} | R_cont: {cont_cost:.3e}')
+
+        # --- ВЫЧИСЛЯЕМ КОВАРИАЦИЮ И CI ДЛЯ ТЕКУЩЕЙ ИТЕРАЦИИ ---
+        # (используем уже написанную функцию compute_parameter_covariance)
+        cov_full, _ = compute_parameter_covariance(J, R, J_G, R_G, theta_full)
+        # Число степеней свободы
+        n_meas = J.shape[0]
+        n_cont = J_G.shape[0]
+        dof = n_meas + n_cont - len(theta_full)
+        ci_low_full, ci_high_full = confidence_intervals(theta_full, cov_full, dof, alpha=0.05)
+        # Сохраняем только первые n_theta параметров
+        ci_low_hist.append(ci_low_full[:n_theta])
+        ci_high_hist.append(ci_high_full[:n_theta])
+
+        delta_theta, mu = compute_delta_gn(J, R, J_G, R_G, mu,
+                                           config.lambda_, config.lambda_reg,
+                                           theta_full, it)
+        theta_full = theta_full + delta_theta
+        theta_hist.append(theta_full[:].copy())
+        r_meas_hist.append(meas_cost)
+        r_cont_hist.append(cont_cost)
+
+    # Преобразуем списки в массивы для удобства
+    ci_low_hist = np.array(ci_low_hist)   # (n_iter, n_theta)
+    ci_high_hist = np.array(ci_high_hist)
+
+    return theta_hist, r_meas_hist, r_cont_hist, theta_full, ci_low_hist, ci_high_hist

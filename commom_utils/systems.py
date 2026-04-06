@@ -108,30 +108,6 @@ class Attractor(ODESystem):
 
 
 
-# class LateralSemiDynamic(System):
-#     def __init__(self):
-#         self.state = SX.sym('psi'), SX.sym('w'), SX.sym('y')
-        
-#     def get_system(self):
-#         psi, w, y = self.state
-#         T, D = SX.sym('T'), SX.sym('D')#, SX.sym('udersteer_gain')
-#         delta = SX.sym('delta')
-#         K = 2
-#         psi_dot = w
-#         w_dot = y
-#         y_dot = T * (K * delta - w) - D * y
-#         f = vertcat(psi_dot, w_dot, y_dot)
-#         return [psi, w, y], [delta], [T, D ], f
-    
-#     def get_input_signals(self, t):
-#         return [(0.1 + 0.09 * t) * np.sin(0.9 *t)]
-    
-#     def observation(self):
-#         psi, w, y = self.state
-#         observed = vertcat(psi, w)
-#         return observed
-
-
 class OscillatorModel(ODESystem):
     def __init__(self):
         super().__init__(nx=2, nu=0, np=2)
