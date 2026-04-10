@@ -44,6 +44,7 @@ def run_mhe_estimation(
     mhe_params,
     num_windows: int,
     R_inv: np.ndarray,
+    ridge_reg: float  = 1.0,
     forgetting_factor: float = 0.95,   # λ
     initial_precision: np.ndarray = None,
     compute_advanced_fim = True,
@@ -83,7 +84,7 @@ def run_mhe_estimation(
 
         # Обновляем накопленную точность (информационную матрицу)
         P_inv = forgetting_factor * P_inv + F_orig
-        F_reg, eig_orig, eig_reg = regularize_fim(P_inv, tau_ratio=1e-4, add_ridge=1.0)
+        F_reg, eig_orig, eig_reg = regularize_fim(P_inv, tau_ratio=1e-4, add_ridge=ridge_reg)
         # if(len(F_reg) == 1):
         #     F_reg = np.array([[1.0]])
         # Настраиваем MHE с априорными параметрами и точностью
@@ -217,10 +218,12 @@ def plot_mhe_results(results, overlap=0, initial_params=None, theta_true=None,
 
     min_len = min(len(t_full), len(measured_full), len(estimated_full), len(params_full))
     t_full = t_full[:min_len]
+    print(estimated_full.shape)
     measured_full = measured_full[:min_len]
+    print(estimated_full.shape)
     estimated_full = estimated_full[:min_len]
     params_full = params_full[:min_len]
-
+   
     # ----- Plotting -----
     for p in active_plots:
         ax = axs[plot_idx]

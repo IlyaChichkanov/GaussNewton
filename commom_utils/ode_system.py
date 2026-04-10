@@ -18,7 +18,7 @@ class ODESystem:
         self.state = ca.SX.sym("x", nx)
         self.theta = ca.SX.sym("theta", np)
         self.u = ca.SX.sym("u", nu)
-        self.n_obs = self.observation(self.state).shape[0]
+        self.n_obs = self.observation(self.state, self.theta, self.u).shape[0]
 
     @abstractmethod
     def get_derivative(self, state: SX, theta: SX, u: SX) -> SX:
@@ -26,10 +26,9 @@ class ODESystem:
 
     def get_system(self):
         f = self.get_derivative(self.state, self.theta, self.u)
-        return self.state, self.u, self.theta, f
+        return self.state, self.theta, self.u, f
     
-    @abstractmethod
-    def observation(self, state):
+    def observation(self, state: SX, theta: SX, u: SX):
         return state
     
     def get_input_signals(self, t):
@@ -53,8 +52,8 @@ class SystemJacobian:
         self.method = method
 
         # Получаем символьные переменные и выражения
-        state_var, inp_signal_var, theta_var, f = self.f_sym.get_system()
-        h_observ = self.f_sym.observation(state_var)
+        state_var, theta_var, inp_signal_var, f = self.f_sym.get_system()
+        h_observ = self.f_sym.observation(state_var, theta_var, inp_signal_var)
 
         # Списки элементов для CasADi функций
         state_list = state_var.elements()

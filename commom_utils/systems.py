@@ -40,6 +40,51 @@ def get_interpolation_symbolic(x_grid, x, name='y_values'):
 
 
 
+
+
+class DelaySystem(ODESystem):
+    """
+    Модель задержки сигнала с аппроксимацией Паде.
+    Параметры:
+        order: 1 или 2 (порядок аппроксимации)
+        dt: не используется, оставлен для совместимости
+    """
+    def __init__(self, order=1):
+        self.order = order
+        if order == 1:
+            super().__init__(nx=1, np=1, nu=1)   # 1 состояние, 1 параметр (tau), 1 вход
+        elif order == 2:
+            super().__init__(nx=2, np=1, nu=1)   # 2 состояния, 1 параметр (tau), 1 вход
+        else:
+            raise ValueError("Order must be 1 or 2")
+
+    def get_derivative(self, state, theta, u):
+        tau = theta[0]
+        tau_safe = ca.fmax(tau, 1e-6)
+        if self.order == 1:
+            x = state[0]
+            dx = (2.0 / tau_safe) * (u - x)
+            return ca.vertcat(dx)
+        else:
+            x1, x2 = state[0], state[1]
+            dx1 = x2
+            #dx2 = -(12.0 / (tau_safe**2)) * x1 - (6.0 / tau_safe) * x2 + (12.0 / (tau_safe**2)) * u
+            dx2 = -(6.0 / tau_safe) * x2 + (12.0 / (tau_safe**2)) * (u - x1)
+            return ca.vertcat(dx1, dx2)
+
+    def observation(self, state, theta, u):
+        tau = theta[0]
+        tau_safe = ca.fmax(tau, 1e-6)
+        if self.order == 1:
+            x = state[0]
+            return 2*u - x
+        else:
+            x2 = state[1]
+            return u - tau_safe * x2
+        
+    def get_input_signals(self, t):
+        return [np.sin(0.2*t)]
+    
 class LateralCarDynamic(ODESystem):
     def __init__(self, wheelbase):
         super().__init__(2, 4, 2)
@@ -63,7 +108,7 @@ class LateralCarDynamic(ODESystem):
         u = 0.04 * jnp.cos(t*0.25*w) * jnp.sin(w*t) 
         return [u, 10.0]
 
-    def observation(self, state):
+    def observation(self, state, theta, u):
         return state
 
 class LotkaVoltera(ODESystem):
@@ -82,7 +127,7 @@ class LotkaVoltera(ODESystem):
     def get_input_signals(self, t):
         return []
  
-    def observation(self, state):
+    def observation(self, state, theta, u):
         x, y = state[0], state[1]
         observed = vertcat(x, y)
         return observed
@@ -100,7 +145,7 @@ class Attractor(ODESystem):
         f = vertcat(dx_dt, dy_dt, dz_dt)
         return f
     
-    def observation(self, state):
+    def observation(self, state, theta, u):
         x, y, z = state[0], state[1], state[2]
         #observed = vertcat(np.sqrt(x**2 + y**2 + ), x/y)
         observed = vertcat(x,y, z)
@@ -120,7 +165,7 @@ class OscillatorModel(ODESystem):
         dx2 = -omega**2 * x1 - 2*zeta*omega * x2
         return vertcat(dx1, dx2)
     
-    def observation(self, state):
+    def observation(self, state, theta, u):
         return state
 
 class MassSpringDamper(ODESystem):
@@ -138,8 +183,6 @@ class MassSpringDamper(ODESystem):
         dx2 = (u - k*x1 - c*x2) / self.mass
         return vertcat(dx1, dx2)  
     
-    def observation(self, state):
-        return state
     
     def get_input_signals(self, t):
         import math
@@ -193,7 +236,7 @@ class KinematicBycicleActuator(ODESystem):
         ddelta_dot = self.kp * (rwa - delta) - self.kv * delta_dot
         return ca.vertcat(dpsi, ddelta, ddelta_dot)
 
-    def observation(self, state):
+    def observation(self, state, theta, u):
         # измеряем только курс
         return state[0]
 
@@ -311,5 +354,5 @@ class Integrator(ODESystem):
         u = 0.5*np.sin(0.5*t) + t*0.001*np.sin(t)
         return [u]
     
-    def observation(self, state):
+    def observation(self, state, theta, u):
         return state[0]

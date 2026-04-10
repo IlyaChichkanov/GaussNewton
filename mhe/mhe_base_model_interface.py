@@ -25,8 +25,8 @@ class MheModel(ABC):
         dx = vertcat(dstate, SX(np.zeros(self.param_length)))
         return dx
 
-    def h_x(self, state: SX) -> SX:
-        return self.system.observation(state)
+    def h_x(self, state: SX, theta: SX, u: SX) -> SX:
+        return self.system.observation(state, theta, u)
     
     def make_continious_acados_model(self) -> AcadosModel:
         """Continuous bicycle model without input delay for MHE."""
@@ -149,7 +149,7 @@ class MheModel(ABC):
             k4 = self.system.get_derivative(x + dt*k3, theta_sym, u)
             x = x + (dt/6.0)*(k1 + 2*k2 + 2*k3 + k4)
             # Measurement at this step (after integration)
-            y = self.h_x(x)
+            y = self.h_x(x, theta_sym, u)
             y_list.append(y)
 
         # Stack all measurements vertically: (N * n_obs, 1)
@@ -292,7 +292,7 @@ class MheCogeGenerator(ABC):
         ocp_mhe.model = model_acados
         x = model_acados.x
         niose = model_acados.u
-        p = model_acados.p
+        input_signal = model_acados.p
         nx = model.state_length
         nu = model.input_length
         n_obs_len = model.obs_length
@@ -308,13 +308,16 @@ class MheCogeGenerator(ABC):
         Q0 = self.params.state_prior_q0
         R = self.params.measurements_residual_r
         W = self.params.noise_peanlty_w
-        stage_cost_expr = (model.h_x(state) - y_meas).T @ R @ (model.h_x(state) - y_meas) + niose.T @ W @ niose
+
+        residual = model.h_x(state, thetas, input_signal) - y_meas
+
+        stage_cost_expr = residual @ R @ residual + niose.T @ W @ niose
         initial_cost_expr = (state - x_prior).T @ Q0 @ (state - x_prior) +\
               (thetas - param_prior).T @ P0 @ (thetas - param_prior)
         ocp_mhe.model.cost_expr_ext_cost = stage_cost_expr
         ocp_mhe.model.cost_expr_ext_cost_e = 0  # Terminal cost
         ocp_mhe.model.cost_expr_ext_cost_0 = initial_cost_expr
-        ocp_mhe.model.p = vertcat(p, y_meas, x_prior, param_prior, p_prior_weights)
+        ocp_mhe.model.p = vertcat(input_signal, y_meas, x_prior, param_prior, p_prior_weights)
         ocp_mhe.parameter_values = np.zeros((nu + n_obs_len + nx_augmented + n_theta * n_theta,))
         # Set cost type to EXTERNAL
         ocp_mhe.cost.cost_type = 'EXTERNAL'
@@ -325,6 +328,7 @@ class MheCogeGenerator(ABC):
         ocp_mhe.solver_options.nlp_solver_type = 'SQP'
         ocp_mhe.solver_options.qp_solver = 'PARTIAL_CONDENSING_HPIPM'
         ocp_mhe.solver_options.nlp_solver_max_iter = 15
+        ocp_mhe.solver_options.levenberg_marquardt = 1e-6
         ocp_mhe.solver_options.hpipm_options = {
             # 'tol': 1e-6,
             # 'reg_epsilon': 1e-6,        # regularization on the Hessian
@@ -333,7 +337,7 @@ class MheCogeGenerator(ABC):
                 'scale': 1,  # включить автоматическое масштабирование
                 'scale_ux': 1,  # масштабировать состояния и управления
         }
-        ocp_mhe.solver_options.hessian_approx = 'EXACT'
+        ocp_mhe.solver_options.hessian_approx = 'GAUSS_NEWTON'
         ocp_mhe.solver_options.print_level = 0
         ocp_mhe.solver_options.nlp_solver_stats_level = 1
         return ocp_mhe

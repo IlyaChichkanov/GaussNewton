@@ -14,6 +14,7 @@ Additionally, the code supports **Moving Horizon Estimation (MHE)** – a recurs
 - Comprehensive visualisation: phase trajectories (2D/3D), time series of all states, parameter convergence, residual plots (measurement and continuity).
 
 Pytest run by command: 
-uv run pytest test/gauss_newton_test.py -v
+1) uv run pytest test/gauss_newton_test.py -v
+2) uv run pytest test/mhe_test.py -v
 
 ![gauss newton visualisation](gauss_newton/demo.gif)
