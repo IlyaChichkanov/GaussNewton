@@ -7,14 +7,14 @@ import sys
 repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root))
 
-from commom_utils.systems import Lotka_voltera, Attractor
+from commom_utils.systems import LotkaVoltera, Attractor
 from commom_utils.ode_system import SyntheticDataGenerator, SystemJacobian
 from gauss_newton.gauss_newton_math import MultipleShooting, run_optimization
 
 # Словарь доступных систем с их конфигурациями
 SYSTEMS_CONFIG = {
     "LotkaVolterra": {
-        "class": Lotka_voltera,
+        "class": LotkaVoltera,
         "true_params": np.array([1.2, 0.4, 0.3, 0.1]),
         "initial_state": np.array([6.0, 5.0]),
         "time_interval": (0.0, 4.0),

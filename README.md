@@ -13,4 +13,7 @@ Additionally, the code supports **Moving Horizon Estimation (MHE)** – a recurs
 - Synthetic data generator with configurable noise and initial condition perturbations.
 - Comprehensive visualisation: phase trajectories (2D/3D), time series of all states, parameter convergence, residual plots (measurement and continuity).
 
+Pytest run by command: 
+uv run pytest test/gauss_newton_test.py -v
+
 ![gauss newton visualisation](gauss_newton/demo.gif)

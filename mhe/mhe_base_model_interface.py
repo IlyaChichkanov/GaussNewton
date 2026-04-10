@@ -5,65 +5,29 @@ from pathlib import Path
 
 import numpy as np
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
-from casadi import SX, CodeGenerator, Function, jacobian, vertcat
+from casadi import SX, CodeGenerator, Function, jacobian, vertcat, reshape, fmax
 import casadi as ca
-from params import MheParams
-from ocp_utils import generate_header, is_discrete
-
+from mhe.params import MheParams
+from commom_utils.ocp_utils import generate_header, is_discrete
+from commom_utils.ode_system import ODESystem
 
 class MheModel(ABC):
-    def __init__(self, nx, nu, np):
-        self.state_length = nx
-        self.input_length = nu
-        self.param_length = np
-
-    @abstractmethod
-    def main_dynamics(self, state: SX, params: SX, input_signals: SX) -> SX:
-        pass
-
-    @property
-    @abstractmethod
-    def bounds_param(self) -> list[tuple]:
-        pass
-
-    @property
-    @abstractmethod
-    def bounds_state(self) -> list[tuple]:
-        pass
-
-    @property
-    @abstractmethod
-    def bounds_noise(self) -> list[tuple]:
-        pass
+    def __init__(self, system: ODESystem):
+        self.system = system
+        self.state_length = system.nx
+        self.input_length = system.nu
+        self.param_length = system.np
+        self.obs_length = system.n_obs
 
     def continuous_dynamics(self, state, params, noise, input_signals) -> SX:
-        dstate = self.main_dynamics(state, params, input_signals)
+        dstate = self.system.get_derivative(state, params, input_signals)
         dstate += noise
         dx = vertcat(dstate, SX(np.zeros(self.param_length)))
         return dx
 
-    def create_step_function(self, dt):
-        print(f'create_step_function {self.name}')
-        print(self.param_length)
-        x = SX.sym('x', self.state_length)
-        theta = SX.sym('theta', self.param_length)
-        u = SX.sym('u', self.input_length)  # [vx, steering]
-
-        # Один шаг RK4
-        k1 = self.main_dynamics(x, theta, u)
-        k2 = self.main_dynamics(x + 0.5 * dt * k1, theta, u)
-        k3 = self.main_dynamics(x + 0.5 * dt * k2, theta, u)
-        k4 = self.main_dynamics(x + dt * k3, theta, u)
-        x_next = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-
-        # Якобианы
-        J_x = jacobian(x_next, x)          # ∂x_next/∂x
-        J_theta = jacobian(x_next, theta)  # ∂x_next/∂θ
-        fun_name = f'step_{self.name}'
-        step_func = Function(fun_name, [x, theta, u], [x_next, J_x, J_theta],
-                            ['x', 'theta', 'u'], ['x_next', 'Jx', 'Jtheta'])
-        return step_func
-
+    def h_x(self, state: SX) -> SX:
+        return self.system.observation(state)
+    
     def make_continious_acados_model(self) -> AcadosModel:
         """Continuous bicycle model without input delay for MHE."""
         # State variables.
@@ -84,7 +48,6 @@ class MheModel(ABC):
         acados_model.param_length = self.param_length
         acados_model.state_length = self.state_length
         acados_model.p = p
-        acados_model.name = self.name
         return acados_model
 
     def make_discrete_acados_model(self, ts: float) -> AcadosModel:
@@ -122,26 +85,55 @@ class MheModel(ABC):
         acados_model.param_length = self.param_length
         acados_model.state_length = self.state_length
         acados_model.p = vertcat(vx, steering)
-        acados_model.name = self.name
         return acados_model
     
-    def compute_fim(self, N, dt, input_signals_data, x0, theta, R_inv=None):
+    def create_step_function(self, dt, name) -> Function:
+        print(f'create_step_function {name}')
+        print(self.param_length)
+        x = SX.sym('x', self.state_length)
+        theta = SX.sym('theta', self.param_length)
+        u = SX.sym('u', self.input_length)  # [vx, steering]
+
+        # Один шаг RK4
+        k1 = self.system.get_derivative(x, theta, u)
+        k2 = self.system.get_derivative(x + 0.5 * dt * k1, theta, u)
+        k3 = self.system.get_derivative(x + 0.5 * dt * k2, theta, u)
+        k4 = self.system.get_derivative(x + dt * k3, theta, u)
+        x_next = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+        # Якобианы
+        J_x = jacobian(x_next, x)          # ∂x_next/∂x
+        J_theta = jacobian(x_next, theta)  # ∂x_next/∂θ
+        fun_name = f'step_{name}'
+        step_func = Function(fun_name, [x, theta, u], [x_next, J_x, J_theta],
+                            ['x', 'theta', 'u'], ['x_next', 'Jx', 'Jtheta'])
+        return step_func
+    
+    def compute_fim(self, N, dt, input_signals_data, x0, theta, R_inv=None) -> np.ndarray:
         """
-        Compute Fisher Information Matrix for parameters theta.
+        Compute Fisher Information Matrix for parameters theta based on measurements.
 
         Parameters:
-            input_signals_data : numpy array of shape (N, self.input_signal_length)
+            N : int
+                Number of integration steps (and measurements).
+            dt : float
+                Time step.
+            input_signals_data : numpy array of shape (N, self.input_length)
                 Input signals at each step.
             x0 : initial state (vector of length nx)
             theta : parameter vector (length n_theta)
-            R_inv : measurement weight (optional)
+            R_inv : measurement weight matrix (n_obs x n_obs) or scalar.
+                If None, identity is used.
+        Returns:
+            FIM : (n_theta, n_theta) numpy array
         """
         nx = self.state_length
         nu = self.input_length
         n_theta = len(theta)
+        n_obs = self.obs_length
 
         # Symbolic variables
-        input_signals_sym = ca.SX.sym('input', N, nu)   # (N x input_signal_length)
+        input_sym = ca.SX.sym('input', N, nu)   # (N, nu)
         x0_sym = ca.SX.sym('x0', nx)
         theta_sym = ca.SX.sym('theta', n_theta)
 
@@ -149,43 +141,50 @@ class MheModel(ABC):
         y_list = []
 
         for k in range(N):
-            u = input_signals_sym[k, :]   # row k
-            k1 = self.main_dynamics(x, theta_sym, u)
-            k2 = self.main_dynamics(x + 0.5*dt*k1, theta_sym, u)
-            k3 = self.main_dynamics(x + 0.5*dt*k2, theta_sym, u)
-            k4 = self.main_dynamics(x + dt*k3, theta_sym, u)
+            u = input_sym[k, :]   # row k
+            # RK4 step
+            k1 = self.system.get_derivative(x, theta_sym, u)
+            k2 = self.system.get_derivative(x + 0.5*dt*k1, theta_sym, u)
+            k3 = self.system.get_derivative(x + 0.5*dt*k2, theta_sym, u)
+            k4 = self.system.get_derivative(x + dt*k3, theta_sym, u)
             x = x + (dt/6.0)*(k1 + 2*k2 + 2*k3 + k4)
-            y_list.append(x)
+            # Measurement at this step (after integration)
+            y = self.h_x(x)
+            y_list.append(y)
 
-        y_all = ca.vertcat(x0_sym, *y_list)
-        J = ca.jacobian(y_all, theta_sym)
+        # Stack all measurements vertically: (N * n_obs, 1)
+        y_all = ca.vertcat(*y_list)
 
-        # Build weight matrix W (same as before)
+        # Jacobian of measurements w.r.t. parameters
+        J = ca.jacobian(y_all, theta_sym)   # shape (N*n_obs, n_theta)
+
+        # Build weight matrix W (block diagonal)
         if R_inv is None:
-            W = ca.DM.eye((N+1)*nx)
+            W = ca.DM.eye(N * n_obs)
         elif isinstance(R_inv, (int, float)):
-            W = R_inv * ca.DM.eye((N+1)*nx)
+            W = R_inv * ca.DM.eye(N * n_obs)
         else:
             R_inv = np.asarray(R_inv)
             if R_inv.ndim == 1:
                 R_mat = np.diag(R_inv)
             else:
                 R_mat = R_inv
-            if R_mat.shape != (nx, nx):
-                raise ValueError(f"R_inv must be {nx}x{nx}, got {R_mat.shape}")
-            W = ca.DM.zeros((N+1)*nx, (N+1)*nx)
-            for i in range(N+1):
-                W[i*nx:(i+1)*nx, i*nx:(i+1)*nx] = ca.DM(R_mat)
+            if R_mat.shape != (n_obs, n_obs):
+                raise ValueError(f"R_inv must be {n_obs}x{n_obs}, got {R_mat.shape}")
+            # Create block diagonal matrix
+            W = ca.DM.zeros(N * n_obs, N * n_obs)
+            for i in range(N):
+                W[i*n_obs:(i+1)*n_obs, i*n_obs:(i+1)*n_obs] = ca.DM(R_mat)
 
+        # Fisher Information Matrix = J^T * W * J
         F = ca.mtimes([J.T, W, J])
 
         # Substitute numeric data
-        # input_signals_data must be a 2D array (N, input_signal_length)
+        # Note: input_signals_data must be of shape (N, nu)
         args = [input_signals_data, x0, theta]
-        F_num = ca.Function('F', [input_signals_sym, x0_sym, theta_sym], [F])(*args)
+        F_num = ca.Function('F', [input_sym, x0_sym, theta_sym], [F])(*args)
 
         return np.array(F_num).reshape((n_theta, n_theta))
-    
 
     def compute_observed_fim(self, N, dt, simU, simY, initial_x0, theta_est, R_inv=None):
         """
@@ -266,26 +265,94 @@ class MheModel(ABC):
         return F_obs
 
 class MheCogeGenerator(ABC):
-    def __init__(self, params: MheParams, generated_folder: Path, model_name: str):
+    def __init__(self, mhe_model: ODESystem, params: MheParams, generated_folder: Path, model_name: str):
         self.params = params
         self.generated_folder = generated_folder
         self.model_name = model_name
+        self.mhe_model = MheModel(mhe_model)
+        state_length = self.mhe_model.state_length
+        param_length = self.mhe_model.param_length
+        obs_length = self.mhe_model.obs_length
+        assert len(params.state_prior_q0) == state_length
+        assert len(params.noise_peanlty_w) == state_length
+        assert len(params.bounds_state) == state_length
+        assert len(params.bounds_noise) == state_length
+        assert len(params.measurements_residual_r) == obs_length
 
-    @abstractmethod
+        assert len(params.bounds_param) == param_length
+        assert params.mhe_horizont > 10
+        assert params.dt > 0
+
+
     def set_ocp_problem(self) -> AcadosOcp:
-        pass
+        ocp_mhe = AcadosOcp()
+        model: MheModel = self.mhe_model
+        model_acados: AcadosModel = model.make_continious_acados_model()
+        model_acados.name = self.model_name
+        ocp_mhe.model = model_acados
+        x = model_acados.x
+        niose = model_acados.u
+        p = model_acados.p
+        nx = model.state_length
+        nu = model.input_length
+        n_obs_len = model.obs_length
+        n_theta = model.param_length
+        nx_augmented = nx + n_theta
+        state, thetas = x[:nx], x[nx:]  # thetas длины 3
+        y_meas = SX.sym('y_meas', n_obs_len)
+        x_prior = SX.sym('x_prior', nx)
+        param_prior = SX.sym('param_prior', n_theta)  # =3
+        p_prior_weights = SX.sym('p_prior_weights', n_theta * n_theta)
+        # Cost expressions (как у вас, но с учётом размерностей)
+        P0 = reshape(p_prior_weights, n_theta, n_theta) * self.params.fim_scaler
+        Q0 = self.params.state_prior_q0
+        R = self.params.measurements_residual_r
+        W = self.params.noise_peanlty_w
+        stage_cost_expr = (model.h_x(state) - y_meas).T @ R @ (model.h_x(state) - y_meas) + niose.T @ W @ niose
+        initial_cost_expr = (state - x_prior).T @ Q0 @ (state - x_prior) +\
+              (thetas - param_prior).T @ P0 @ (thetas - param_prior)
+        ocp_mhe.model.cost_expr_ext_cost = stage_cost_expr
+        ocp_mhe.model.cost_expr_ext_cost_e = 0  # Terminal cost
+        ocp_mhe.model.cost_expr_ext_cost_0 = initial_cost_expr
+        ocp_mhe.model.p = vertcat(p, y_meas, x_prior, param_prior, p_prior_weights)
+        ocp_mhe.parameter_values = np.zeros((nu + n_obs_len + nx_augmented + n_theta * n_theta,))
+        # Set cost type to EXTERNAL
+        ocp_mhe.cost.cost_type = 'EXTERNAL'
+        ocp_mhe.cost.cost_type_e = 'EXTERNAL'
+        ocp_mhe.cost.cost_type_0 = 'EXTERNAL'
 
-    @abstractmethod
-    def get_model() -> MheModel:
-        pass
+        ocp_mhe.solver_options.nlp_solver_type = 'SQP_RTI'  # Faster than SQP for real-time
+        ocp_mhe.solver_options.nlp_solver_type = 'SQP'
+        ocp_mhe.solver_options.qp_solver = 'PARTIAL_CONDENSING_HPIPM'
+        ocp_mhe.solver_options.nlp_solver_max_iter = 15
+        ocp_mhe.solver_options.hpipm_options = {
+            # 'tol': 1e-6,
+            # 'reg_epsilon': 1e-6,        # regularization on the Hessian
+            # 'reg_epsilon_s': 1e-6,       # regularization on the slack variables (if any)
+            # 'iter_max': 1000
+                'scale': 1,  # включить автоматическое масштабирование
+                'scale_ux': 1,  # масштабировать состояния и управления
+        }
+        ocp_mhe.solver_options.hessian_approx = 'EXACT'
+        ocp_mhe.solver_options.print_level = 0
+        ocp_mhe.solver_options.nlp_solver_stats_level = 1
+        return ocp_mhe
+
+    def get_model(self) -> MheModel:
+        return self.mhe_model
+    
+  
+    def modify_ocp_problem(self, ocp_mhe: AcadosOcp) -> AcadosOcp:
+        return ocp_mhe
 
     def generate_code(self):
         ocp_mhe = self.set_ocp_problem()
+        ocp_mhe = self.modify_ocp_problem(ocp_mhe)
         ocp_mhe.solver_options.N_horizon = self.params.mhe_horizont
         ocp_mhe.solver_options.tf = self.params.mhe_horizont * self.params.dt
         model = self.get_model()
         nx = model.state_length
-        bounds_state = model.bounds_state
+        bounds_state = self.params.bounds_state
         lb_state = np.array([b[0] for b in bounds_state])
         ub_state = np.array([b[1] for b in bounds_state])
         finite_mask = np.isfinite(lb_state) & np.isfinite(ub_state)
@@ -293,7 +360,7 @@ class MheCogeGenerator(ABC):
         lb_state = lb_state[finite_mask]
         ub_state = ub_state[finite_mask]
 
-        bounds_param = model.bounds_param
+        bounds_param = self.params.bounds_param
         lb_theta = np.array([b[0] for b in bounds_param])
         ub_theta = np.array([b[1] for b in bounds_param])
         finite_mask = np.isfinite(lb_theta) & np.isfinite(ub_theta)
@@ -304,9 +371,9 @@ class MheCogeGenerator(ABC):
         ocp_mhe.constraints.lbx = np.hstack((lb_state, lb_theta))
         ocp_mhe.constraints.ubx = np.hstack((ub_state, ub_theta))
         ocp_mhe.constraints.idxbx = np.hstack((idx_state, idx_theta))
-
-        ocp_mhe.constraints.lbu = np.array([b[0] for b in model.bounds_noise])
-        ocp_mhe.constraints.ubu = np.array([b[1] for b in model.bounds_noise])
+        bounds_noise = self.params.bounds_noise
+        ocp_mhe.constraints.lbu = np.array([b[0] for b in bounds_noise])
+        ocp_mhe.constraints.ubu = np.array([b[1] for b in bounds_noise])
         ocp_mhe.constraints.idxbu = np.arange(0, nx)
 
         print(ocp_mhe.constraints.lbx)
@@ -357,7 +424,7 @@ class MheCogeGenerator(ABC):
                         definitions, f'MPC_SETTINGS_{self.model_name}')
 
     def generate_fim_function(self, dt: float):
-        fim_func = self.get_model().create_step_function(dt)
+        fim_func = self.get_model().create_step_function(dt, self.model_name)
         output_dir = str(self.generated_folder / self.model_name)
         os.makedirs(output_dir, exist_ok=True)
 

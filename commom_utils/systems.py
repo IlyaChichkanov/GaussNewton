@@ -66,7 +66,7 @@ class LateralCarDynamic(ODESystem):
     def observation(self, state):
         return state
 
-class Lotka_voltera(ODESystem):
+class LotkaVoltera(ODESystem):
     def __init__(self):
         super().__init__(2, 4, 0)
  
@@ -164,9 +164,6 @@ class KinematicBycicle(ODESystem):
         dpsi = vx * ca.tan(rwa) / self.wheelbase
         return ca.vertcat(dpsi)
 
-    def observation(self, state):
-        return state[0]
-
     def get_input_signals(self, t):
         import math
         w = 0.7
@@ -176,9 +173,11 @@ class KinematicBycicle(ODESystem):
         return [10.0, steering]
 
 class KinematicBycicleActuator(ODESystem):
-    def __init__(self, wheelbase):
+    def __init__(self, wheelbase, kp = 80.9, kv = 80.61):
         super().__init__(nx=3, nu=2, np=2)
         self.wheelbase = wheelbase
+        self.kp = kp
+        self.kv = kv
 
     def get_derivative(self, state, params, input_signals):
         psi = state[0]
@@ -190,10 +189,8 @@ class KinematicBycicleActuator(ODESystem):
         steering = input_signals[1]
         dpsi = vx * (np.tan(delta)) / (self.wheelbase) 
         ddelta = delta_dot
-        kp = 80.9
-        kv = 80.61
         rwa = GR * steering + offset
-        ddelta_dot = kp * (rwa - delta) - kv * delta_dot
+        ddelta_dot = self.kp * (rwa - delta) - self.kv * delta_dot
         return ca.vertcat(dpsi, ddelta, ddelta_dot)
 
     def observation(self, state):
@@ -208,3 +205,111 @@ class KinematicBycicleActuator(ODESystem):
             steering = 0
         return [10.0, steering]
 
+
+
+class RosenzweigMacArthur(ODESystem):
+    def __init__(self):
+        super().__init__(nx=2, nu=0, np=1)
+
+   
+    def get_derivative(self, state, params, input_signals):
+        x, y = state[0], state[1]
+        r, K, a, h, e, m = params[0], params[1], params[2], params[3], params[4], params[5]
+        
+        # Правые части
+        dx = r * x * (1 - x/K) - (a * x**2 * y) / (1 + a * h * x**2)
+        dy = e * (a * x**2 * y) / (1 + a * h * x**2) - m * y
+        rhs = vertcat(dx, dy)
+        return rhs
+    
+
+class Quadrotor2D(ODESystem):
+    """
+    Упрощенная 2D-модель квадрокоптера (движение в плоскости X-Z).
+
+    Состояние (state): [x, z, phi, x_dot, z_dot, phi_dot]
+        x, z     - позиция в горизонтальной и вертикальной плоскостях,
+        phi      - угол тангажа (pitch),
+        x_dot    - горизонтальная скорость,
+        z_dot    - вертикальная скорость,
+        phi_dot  - угловая скорость.
+
+    Параметры (params): [m, J, g, k_T, k_M]
+        m  - масса дрона,
+        J  - момент инерции,
+        g  - ускорение свободного падения,
+        k_T - коэффициент тяги,
+        k_M - коэффициент момента (связь углового ускорения с силой).
+
+    Входной сигнал (input_signals): [u]
+        u - разность сил тяги между левым и правым роторами (управляющий сигнал).
+    """
+
+    def __init__(self):
+        super().__init__(nx=6, nu=1, np=1)
+
+    def get_derivative(self, state, params, input_signals):
+        # Распаковка состояния
+        x, z, phi, x_dot, z_dot, phi_dot = state[0], state[1], state[2], state[3], state[4], state[5]
+
+        # Распаковка параметров
+        #m, J, k_T, k_M = params[0], params[1], params[2], params[3]
+        k_T = params[0]
+        J, m, k_M = 10, 1, 1
+        # Управляющий сигнал
+        u = input_signals[0]
+        g = 10
+        # Сила тяги, создаваемая роторами (упрощённо, без динамики моторов)
+        F_total = k_T * u
+
+        # Вычисление производных
+        dx_dt = x_dot
+        dz_dt = z_dot
+        dphi_dt = phi_dot
+
+        # Ускорения: горизонтальное, вертикальное и угловое
+        dx_dot_dt = -(F_total / m) * np.sin(phi)
+        dz_dot_dt = (F_total / m) * np.cos(phi) - g
+        dphi_dot_dt = (k_M / J) * u
+
+        # Собираем вектор производных
+        rhs = vertcat(dx_dt, dz_dt, dphi_dt, dx_dot_dt, dz_dot_dt, dphi_dot_dt)
+
+        return rhs
+    
+    def get_input_signals(self, t):
+        u = 0.5*np.sin(0.05*t) + t
+        return [u]
+
+
+class Integrator(ODESystem):
+
+    def __init__(self):
+        super().__init__(nx=2, nu=1, np=1)
+
+    def get_derivative(self, state, params, input_signals):
+        # Распаковка состояния
+        x, v = state[0], state[1]
+
+        # Распаковка параметров
+        #m, J, k_T, k_M = params[0], params[1], params[2], params[3]
+        k = params[0]
+       
+        dx_dt = v
+
+        u = input_signals[0]
+        # Ускорения: горизонтальное, вертикальное и угловое
+        dv_dt = k*u
+
+
+        # Собираем вектор производных
+        rhs = vertcat(dx_dt, dv_dt)
+
+        return rhs
+
+    def get_input_signals(self, t):
+        u = 0.5*np.sin(0.5*t) + t*0.001*np.sin(t)
+        return [u]
+    
+    def observation(self, state):
+        return state[0]

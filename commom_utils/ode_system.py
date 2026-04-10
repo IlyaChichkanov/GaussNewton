@@ -29,9 +29,8 @@ class ODESystem:
         return self.state, self.u, self.theta, f
     
     @abstractmethod
-    def observation(self):
-        observed = self.state
-        return observed
+    def observation(self, state):
+        return state
     
     def get_input_signals(self, t):
         return []
@@ -466,12 +465,9 @@ class MHESyntheticDataGenerator:
         self.sigma = sigma
         self.state_dim, self.param_dim, self.meas_dim = self.system.get_dimentions()
         # Determine control dimension (adjust if your system has a different attribute)
-        try:
-            self.control_dim = self.system.control_dim
-        except AttributeError:
-            t0 = 0.0
-            u0 = self.system.f_sym.get_input_signals(t0)
-            self.control_dim = len(u0)
+
+        self.control_dim = system_ode.nu
+
 
     def _generate_trajectory(self, c0, theta, t, sigma=None):
         """
@@ -506,12 +502,14 @@ class MHESyntheticDataGenerator:
         # Compute measured outputs
         measured = np.zeros((len(t), self.meas_dim))
         for i, state in enumerate(noisy_full):
+            
             measured[i] = self.system.h_x(state, t[i], theta)
+           
 
         return t, u, noisy_full, measured
 
-    def generate_sliding_windows_exact(self, c0, theta, t0, T_f, num_windows,
-                                       N_measurement, overlap_points=1, sigma=None):
+    def generate_sliding_windows_exact(self, c0, theta, t0, tf, num_windows,
+                                       n_measurement, overlap_points=1, sigma=None):
         """
         Generate overlapping windows that each cover exactly T_f seconds.
 
@@ -519,9 +517,9 @@ class MHESyntheticDataGenerator:
             c0 (array): Initial state.
             theta (array): Model parameters.
             t0 (float): Start time of the first window.
-            T_f (float): Time span of each window.
+            t_f (float): Time span of each window.
             num_windows (int): Number of overlapping windows.
-            N_measurement (int): Number of points per window.
+            n_measurement (int): Number of points per window.
             overlap_points (int): Number of points that overlap between consecutive windows.
                                    Default 1 gives windows like [1-8],[2-9] if step = N_measurement-1.
             sigma (float, optional): Noise std.
@@ -530,15 +528,18 @@ class MHESyntheticDataGenerator:
             tuple: (list_of_time_arrays, list_of_control_inputs,
                     list_of_measured_states, list_of_full_states)
         """
+
+        assert(len(c0) == self.state_dim)
+        assert(len(theta) == self.param_dim)
         # Time step between consecutive points inside a window
-        dt = T_f / (N_measurement - 1)
+        dt = tf / (n_measurement - 1)
 
         # Step in points between window starts
-        step = N_measurement - overlap_points
+        step = n_measurement - overlap_points
 
         # Build the overall time vector
-        total_points = 1 + (num_windows - 1) * step + (N_measurement - 1)
-        t_long = np.linspace(t0, t0 + (num_windows - 1) * step * dt + T_f, total_points)
+        total_points = 1 + (num_windows - 1) * step + (n_measurement - 1)
+        t_long = np.linspace(t0, t0 + (num_windows - 1) * step * dt + tf, total_points)
 
         # Generate the long trajectory
         t_long, u_long, full_long, meas_long = self._generate_trajectory(
@@ -553,7 +554,7 @@ class MHESyntheticDataGenerator:
 
         for i in range(num_windows):
             start_idx = i * step
-            end_idx = start_idx + N_measurement
+            end_idx = start_idx + n_measurement
             t_windows.append(t_long[start_idx:end_idx])
             u_windows.append(u_long[start_idx:end_idx])
             meas_windows.append(meas_long[start_idx:end_idx])

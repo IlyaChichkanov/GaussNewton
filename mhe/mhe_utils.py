@@ -52,6 +52,8 @@ def run_mhe_estimation(
 ) -> Tuple[List[MheIterationResult], np.ndarray]:
     N_measurement = mhe_params.mhe_horizont
     n_theta = mhe_model.param_length
+    n_obs = mhe_model.obs_length
+    nx = mhe_model.state_length
     results = []
     # Инициализация
     if initial_precision is None:
@@ -70,7 +72,7 @@ def run_mhe_estimation(
         simY = np.hstack((simY, np.zeros((simY.shape[0], unknown_state_length))))
 
         if iter_idx == 0:
-            initial_x0 = simY[0]
+            initial_x0 = np.zeros(nx)
 
         # Вычисляем FIM для текущего окна
         F_orig = None
@@ -81,8 +83,11 @@ def run_mhe_estimation(
 
         # Обновляем накопленную точность (информационную матрицу)
         P_inv = forgetting_factor * P_inv + F_orig
-        F_reg, eig_orig, eig_reg = regularize_fim(P_inv, tau_ratio=1e-4, add_ridge=1e-9)
+        F_reg, eig_orig, eig_reg = regularize_fim(P_inv, tau_ratio=1e-4, add_ridge=1.0)
+        # if(len(F_reg) == 1):
+        #     F_reg = np.array([[1.0]])
         # Настраиваем MHE с априорными параметрами и точностью
+
         set_mhe_solver(
             mhe_model, acados_solver_factory, simY, simU, initial_x0, theta_prior,
             N_measurement, F_reg   # P0 = накопленная точность
@@ -386,7 +391,7 @@ def get_mhe_estimated_data(mhe_model: MheModel, acados_solver_mhe: AcadosOcpSolv
     """
     nx = mhe_model.state_length
     param_length = mhe_model.param_length
-
+    
     simXest = np.zeros((N + 1, nx))
     simWest = np.zeros((N, nx))
     sim_param_est = np.zeros(param_length,)
