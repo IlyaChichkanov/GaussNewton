@@ -14,9 +14,21 @@ from mhe.mhe_utils import run_mhe_estimation
 # ------------------------------------------------------------
 # Configuration for different systems
 # ------------------------------------------------------------
+
+def get_input_signals_bycicle(t):
+    import math
+    w = 0.7
+    steering = 0.8 * math.cos(t * 0.25 * w) * math.sin(w * t)
+    if t < 25:
+        steering = 0
+    v = 10.0
+    return [v, steering]
+
+
 SYSTEM_CONFIGS = {
     "KinematicBicycle": {
         "system_class": KinematicBycicle,
+        "get_input_signals": lambda t: get_input_signals_bycicle(t), 
         "system_kwargs": {"wheelbase": 2.65},
         "true_params": np.array([0.05, np.deg2rad(-0.3)]),  # [v, steering_angle]
         "initial_state": np.array([0.0]),                   # [x] or [position]
@@ -45,8 +57,18 @@ def test_mhe_identification(system_config, tmp_path):
     """
     config, system_name = system_config
 
-    # Create system instance
-    system = config["system_class"](**config.get("system_kwargs", {}))
+
+    class CustomSystem(config["system_class"]):
+        pass
+
+    if "get_input_signals" in config:
+        def get_input_signals(self, t):
+            return config["get_input_signals"](t)
+        CustomSystem.get_input_signals = get_input_signals
+
+    # Создаём систему
+    system = CustomSystem(**config.get("system_kwargs", {}))
+
     check_system_ok(system)
 
     # MHE parameters
@@ -104,6 +126,7 @@ def test_mhe_identification(system_config, tmp_path):
     initial_theta = config["initial_params"]
 
     # Run MHE estimation
+
     results = run_mhe_estimation(
         mhe_model=generator.get_model(),
         acados_solver_factory=acados_solver,
@@ -112,11 +135,13 @@ def test_mhe_identification(system_config, tmp_path):
         initial_theta=initial_theta,
         mhe_params=mhe_params,
         num_windows=num_windows,
+        ridge_reg = 1e-0,
         R_inv=mhe_params.measurements_residual_r,
         forgetting_factor=0.01,
         compute_advanced_fim=True,
         plot=False
     )
+
 
     # Check that the last window's parameter estimate is close to true values
     final_theta_est = results[-1].param_est

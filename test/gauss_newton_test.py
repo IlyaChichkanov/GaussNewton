@@ -76,7 +76,7 @@ def synthetic_data(system, true_params, initial_state, time_interval, system_con
         perturbation_scale=0.0,
         use_jax=True
     )
-    t_batches, meas_batches, state_batches = gen.generate(
+    t_batches, meas_batches, state_batches, _ = gen.generate(
         c0=initial_state,
         theta=true_params,
         time_intervals=[time_interval],

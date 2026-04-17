@@ -40,23 +40,39 @@ def get_interpolation_symbolic(x_grid, x, name='y_values'):
 
 
 
+class Pendulum(ODESystem):
+    def __init__(self, order=1):
+        super().__init__(nx=4, np=3, nu=1)
+
+    def get_derivative(self, state, theta, u):
+        g = 10
+        M, m, l = theta[0], theta[1], theta[2]
+        x1, theta, v1, dtheta = state[0], state[1], state[2], state[3]
+        F = u[0]
+        denominator = M + m - m*np.cos(theta)*np.cos(theta)
+        f_expl = vertcat(v1,
+                        dtheta,
+                        (-m*l*np.sin(theta)*dtheta*dtheta + m*g*np.cos(theta)*np.sin(theta)+F)/denominator,
+                        (-m*l*np.cos(theta)*np.sin(theta)*dtheta*dtheta + F*np.cos(theta)+(M+m)*g*np.sin(theta))/(l*denominator))
+
+        return f_expl
+
+
+    def observation(self, state, theta, u):
+        x1, theta, v1, dtheta = state[0], state[1], state[2], state[3]
+        return x1, theta
+        
+    def get_input_signals(self, t):
+        return [jnp.sin(0.2*t)]
 
 
 class DelaySystem(ODESystem):
-    """
-    Модель задержки сигнала с аппроксимацией Паде.
-    Параметры:
-        order: 1 или 2 (порядок аппроксимации)
-        dt: не используется, оставлен для совместимости
-    """
     def __init__(self, order=1):
         self.order = order
         if order == 1:
-            super().__init__(nx=1, np=1, nu=1)   # 1 состояние, 1 параметр (tau), 1 вход
-        elif order == 2:
-            super().__init__(nx=2, np=1, nu=1)   # 2 состояния, 1 параметр (tau), 1 вход
+            super().__init__(nx=1, np=1, nu=1)
         else:
-            raise ValueError("Order must be 1 or 2")
+            super().__init__(nx=2, np=1, nu=1)
 
     def get_derivative(self, state, theta, u):
         tau = theta[0]
@@ -68,8 +84,7 @@ class DelaySystem(ODESystem):
         else:
             x1, x2 = state[0], state[1]
             dx1 = x2
-            #dx2 = -(12.0 / (tau_safe**2)) * x1 - (6.0 / tau_safe) * x2 + (12.0 / (tau_safe**2)) * u
-            dx2 = -(6.0 / tau_safe) * x2 + (12.0 / (tau_safe**2)) * (u - x1)
+            dx2 = -(12.0 / (tau_safe**2)) * x1 - (6.0 / tau_safe) * x2 + (12.0 / (tau_safe**2)) * u
             return ca.vertcat(dx1, dx2)
 
     def observation(self, state, theta, u):
@@ -83,7 +98,7 @@ class DelaySystem(ODESystem):
             return u - tau_safe * x2
         
     def get_input_signals(self, t):
-        return [np.sin(0.2*t)]
+        return [jnp.sin(0.2*t)]
     
 class LateralCarDynamic(ODESystem):
     def __init__(self, wheelbase):
@@ -207,13 +222,6 @@ class KinematicBycicle(ODESystem):
         dpsi = vx * ca.tan(rwa) / self.wheelbase
         return ca.vertcat(dpsi)
 
-    def get_input_signals(self, t):
-        import math
-        w = 0.7
-        steering = 0.8 * math.cos(t * 0.25 * w) * math.sin(w * t)
-        if t < 25:
-            steering = 0
-        return [10.0, steering]
 
 class KinematicBycicleActuator(ODESystem):
     def __init__(self, wheelbase, kp = 80.9, kv = 80.61):
@@ -239,14 +247,6 @@ class KinematicBycicleActuator(ODESystem):
     def observation(self, state, theta, u):
         # измеряем только курс
         return state[0]
-
-    def get_input_signals(self, t):
-        import math
-        w = 0.7
-        steering = 0.8 * math.cos(t * 0.25 * w) * math.sin(w * t)
-        if t < 25:
-            steering = 0
-        return [10.0, steering]
 
 
 

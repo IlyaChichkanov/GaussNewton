@@ -1,6 +1,6 @@
 
 import os
-from abc import ABC, abstractmethod
+from abc import ABC
 from pathlib import Path
 
 import numpy as np
@@ -303,6 +303,9 @@ class MheCogeGenerator(ABC):
         x_prior = SX.sym('x_prior', nx)
         param_prior = SX.sym('param_prior', n_theta)  # =3
         p_prior_weights = SX.sym('p_prior_weights', n_theta * n_theta)
+
+        ocp_mhe.model.p = vertcat(input_signal, y_meas, x_prior, param_prior, p_prior_weights)
+        ocp_mhe.parameter_values = np.zeros((nu + n_obs_len + nx_augmented + n_theta * n_theta,))
         # Cost expressions (как у вас, но с учётом размерностей)
         P0 = reshape(p_prior_weights, n_theta, n_theta) * self.params.fim_scaler
         Q0 = self.params.state_prior_q0
@@ -317,8 +320,7 @@ class MheCogeGenerator(ABC):
         ocp_mhe.model.cost_expr_ext_cost = stage_cost_expr
         ocp_mhe.model.cost_expr_ext_cost_e = 0  # Terminal cost
         ocp_mhe.model.cost_expr_ext_cost_0 = initial_cost_expr
-        ocp_mhe.model.p = vertcat(input_signal, y_meas, x_prior, param_prior, p_prior_weights)
-        ocp_mhe.parameter_values = np.zeros((nu + n_obs_len + nx_augmented + n_theta * n_theta,))
+
         # Set cost type to EXTERNAL
         ocp_mhe.cost.cost_type = 'EXTERNAL'
         ocp_mhe.cost.cost_type_e = 'EXTERNAL'

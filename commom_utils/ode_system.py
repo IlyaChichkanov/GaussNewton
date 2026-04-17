@@ -391,7 +391,7 @@ class SyntheticDataGenerator:
         else:
             # get_solution возвращает (state_len, n_measurements)
             sol = self.system.get_solution(c0_true, theta, t_eval)
-            solution = sol.T  # приводим к (n_measurements, state_len)
+            solution = sol  # приводим к (n_measurements, state_len)
 
         # Добавляем шум к состояниям
         noise = self.sigma * np.random.normal(size=(self.state_len, n_measurements))
@@ -399,10 +399,11 @@ class SyntheticDataGenerator:
 
         # Вычисляем измерения
         measurements = np.zeros((n_measurements, self.meas_len))
+        inp_signal = np.zeros((n_measurements, self.system.inp_signal_len))
         for i, state in enumerate(noisy_states):
             measurements[i] = self.system.h_x(state, t_eval[i], theta)
-
-        return t_eval, measurements, noisy_states
+            inp_signal[i] = self.system.f_sym.get_input_signals(t_eval[i])
+        return t_eval, measurements, noisy_states, inp_signal
 
     def generate(self, c0, theta, time_intervals, n_measurements, seeds=None):
         """
@@ -434,19 +435,21 @@ class SyntheticDataGenerator:
             raise ValueError("Длина seeds должна совпадать с количеством интервалов")
 
         t_batches = []
+        input_signal = []
         measured_batches = []
         state_batches = []
-
+        inp_signals = []
         for idx, (t_start, t_end) in enumerate(time_intervals):
             seed = seeds[idx] if seeds is not None else None
-            t_eval, meas, states = self.generate_batch(
+            t_eval, meas, states, inp_signal = self.generate_batch(
                 c0, theta, t_start, t_end, n_measurements, seed=seed
             )
             t_batches.append(t_eval)
             measured_batches.append(meas)
             state_batches.append(states)
-
-        return t_batches, measured_batches, state_batches
+            inp_signals.append(inp_signal)
+            
+        return t_batches, measured_batches, state_batches, inp_signals
     
 
 
@@ -501,7 +504,6 @@ class MHESyntheticDataGenerator:
         # Compute measured outputs
         measured = np.zeros((len(t), self.meas_dim))
         for i, state in enumerate(noisy_full):
-            
             measured[i] = self.system.h_x(state, t[i], theta)
            
 
@@ -532,7 +534,7 @@ class MHESyntheticDataGenerator:
         assert(len(theta) == self.param_dim)
         # Time step between consecutive points inside a window
         dt = tf / (n_measurement - 1)
-
+        
         # Step in points between window starts
         step = n_measurement - overlap_points
 
