@@ -35,10 +35,36 @@ class MheIterationResult:
     sqp_iter: int
 
 
+def reset_mhe_solver(mhe_model: MheModel, 
+               acados_solver_mhe: AcadosOcpSolver, 
+               simU: np.array, 
+               initial_x0: np.array, 
+               initial_theta: np.array, 
+               N: int) -> tuple :
+    assert(len(initial_x0) == mhe_model.state_length)
+    assert(len(initial_theta) == mhe_model.param_length)
+    assert simU.shape[0] >= N, f"simU должен содержать хотя бы {N} строк"
+
+    x_sim = initial_x0.copy()
+
+    integrate_f = mhe_model.create_intefrate_function(0.02, "integrate")
+    for j in range(N):
+        # Формируем расширенный вектор состояния + параметров
+        x_aug = np.hstack((x_sim, initial_theta))
+        acados_solver_mhe.set(j, "x", x_aug)
+
+        # Делаем шаг вперёд по дискретной динамике
+        if j < N - 1:
+            x_sim = np.array(integrate_f(x_sim, initial_theta, simU[j, :])).T[0]
+
+
+
+
 def run_mhe_estimation(
     mhe_model,
     acados_solver_factory,
     get_window_func,
+    get_initial_state_func,
     overlap_points: int,
     initial_theta: np.ndarray,
     mhe_params,
@@ -68,12 +94,12 @@ def run_mhe_estimation(
         iterator = tqdm(iterator, desc="MHE windows", unit="window")
 
     for iter_idx in iterator:
-        t_batch, simU, simY = get_window_func(iter_idx)
+        t_batch, simU, simY, _ = get_window_func(iter_idx)
         unknown_state_length = 0
         simY = np.hstack((simY, np.zeros((simY.shape[0], unknown_state_length))))
 
         if iter_idx == 0:
-            initial_x0 = np.zeros(nx)
+            initial_x0 = get_initial_state_func(simY[0], simU[0], initial_theta) 
 
         # Вычисляем FIM для текущего окна
         F_orig = None
@@ -378,7 +404,10 @@ def set_mhe_solver(mhe_model: MheModel,
     for j in range(N):   
         p_ext = np.hstack((simU[j, :], simY[j, :], x_prior, P0.flatten()))
         acados_solver_mhe.set(j, "p", p_ext)
-
+        # if j == 0:
+        #     # Для первого узла используем переданное initial_x0 (которое уже должно быть согласовано)
+        #     x_aug = np.hstack((initial_x0, initial_theta))
+        #     acados_solver_mhe.set(j, "x", x_aug)
 
 def get_mhe_estimated_data(mhe_model: MheModel, acados_solver_mhe: AcadosOcpSolver, N: int):
     """

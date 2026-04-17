@@ -7,6 +7,7 @@ import numpy as np
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 from casadi import SX, CodeGenerator, Function, jacobian, vertcat, reshape, fmax
 import casadi as ca
+from scipy.optimize import fsolve
 from mhe.params import MheParams
 from commom_utils.ocp_utils import generate_header, is_discrete
 from commom_utils.ode_system import ODESystem
@@ -109,6 +110,25 @@ class MheModel(ABC):
                             ['x', 'theta', 'u'], ['x_next', 'Jx', 'Jtheta'])
         return step_func
     
+    def create_intefrate_function(self, dt, name) -> Function:
+        print(f'create_step_function {name}')
+        print(self.param_length)
+        x = SX.sym('x', self.state_length)
+        theta = SX.sym('theta', self.param_length)
+        u = SX.sym('u', self.input_length)  # [vx, steering]
+
+        # Один шаг RK4
+        k1 = self.system.get_derivative(x, theta, u)
+        k2 = self.system.get_derivative(x + 0.5 * dt * k1, theta, u)
+        k3 = self.system.get_derivative(x + 0.5 * dt * k2, theta, u)
+        k4 = self.system.get_derivative(x + dt * k3, theta, u)
+        x_next = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+        fun_name = f'step_{name}'
+        integrate_func = Function(fun_name, [x, theta, u], [x_next],
+                            ['x', 'theta', 'u'], ['x_next'])
+        return integrate_func 
+    
     def compute_fim(self, N, dt, input_signals_data, x0, theta, R_inv=None) -> np.ndarray:
         """
         Compute Fisher Information Matrix for parameters theta based on measurements.
@@ -185,6 +205,7 @@ class MheModel(ABC):
         F_num = ca.Function('F', [input_sym, x0_sym, theta_sym], [F])(*args)
 
         return np.array(F_num).reshape((n_theta, n_theta))
+
 
     def compute_observed_fim(self, N, dt, simU, simY, initial_x0, theta_est, R_inv=None):
         """
@@ -314,7 +335,7 @@ class MheCogeGenerator(ABC):
 
         residual = model.h_x(state, thetas, input_signal) - y_meas
 
-        stage_cost_expr = residual @ R @ residual + niose.T @ W @ niose
+        stage_cost_expr = residual.T @ R @ residual + niose.T @ W @ niose
         initial_cost_expr = (state - x_prior).T @ Q0 @ (state - x_prior) +\
               (thetas - param_prior).T @ P0 @ (thetas - param_prior)
         ocp_mhe.model.cost_expr_ext_cost = stage_cost_expr

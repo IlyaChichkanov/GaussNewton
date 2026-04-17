@@ -6,10 +6,10 @@ import numpy as np
 import pytest
 from acados_template import AcadosOcp
 from commom_utils.ode_system import check_system_ok, MHESyntheticDataGenerator
-from commom_utils.systems import KinematicBycicle  # add other systems as needed
+from commom_utils.systems import KinematicBycicle, DelaySystem  # add other systems as needed
 from mhe.mhe_base_model_interface import MheCogeGenerator
 from mhe.params import MheParams
-from mhe.mhe_utils import run_mhe_estimation
+from mhe.mhe_utils import run_mhe_estimation, reset_mhe_solver
 
 # ------------------------------------------------------------
 # Configuration for different systems
@@ -24,6 +24,10 @@ def get_input_signals_bycicle(t):
     v = 10.0
     return [v, steering]
 
+def harmonic(t):
+    u  = np.sin(0.3*t)
+    return [u]
+
 
 SYSTEM_CONFIGS = {
     "KinematicBicycle": {
@@ -31,15 +35,31 @@ SYSTEM_CONFIGS = {
         "get_input_signals": lambda t: get_input_signals_bycicle(t), 
         "system_kwargs": {"wheelbase": 2.65},
         "true_params": np.array([0.05, np.deg2rad(-0.3)]),  # [v, steering_angle]
+        "initial_params": np.array([0.02, np.deg2rad(2.3)]),
         "initial_state": np.array([0.0]),                   # [x] or [position]
-        "bounds_param": [np.deg2rad([-5, 5]), [-1, 1]],
-        "bounds_state": [[-np.inf, np.inf]],
-        "bounds_noise": [[-0.01, 0.01]],
         "state_prior_q0": np.diag([1.0]),
         "noise_penalty_w": np.eye(1) * 1e3,
         "measurements_residual_r": np.diag([1.0]),
         "fim_scaler": 0.2,
-        "initial_params": np.array([0.02, np.deg2rad(2.3)])
+        "bounds_param": [np.deg2rad([-5, 5]), [-1, 1]],
+        "bounds_state": [[-np.inf, np.inf]],
+        "bounds_noise": [[-0.01, 0.01]],
+    },
+    "DelaySystem": {
+        "system_class": DelaySystem,
+        "get_input_signals": lambda t: harmonic(t),
+        "get_initial_state": lambda y_meas, u, theta: np.hstack((u, 0)),
+        "system_kwargs":  {"order": 2},  # порядок (1 = Паде 1‑го порядка)
+        "initial_state": np.array(2*[0.0]),  # начальное состояние для одного состояния
+        "true_params": np.array([0.4]),
+        "initial_params": np.array([0.1]),
+        "state_prior_q0": 0*np.diag(2*[1]),
+        "noise_penalty_w": np.eye(2) * 1e3,
+        "measurements_residual_r": np.diag([1]),
+        "fim_scaler": 0.1,
+        "bounds_noise": 2*[[-0.01, 0.01]],
+        "bounds_state": 2*[[-1e5, 1e5]],
+        "bounds_param": [[0, 20]],
     },
     # Add more systems here, e.g.:
     # "AnotherSystem": {...}
@@ -65,6 +85,15 @@ def test_mhe_identification(system_config, tmp_path):
         def get_input_signals(self, t):
             return config["get_input_signals"](t)
         CustomSystem.get_input_signals = get_input_signals
+
+    if "get_initial_state" in config:
+        def get_initial_state(self, y_meas, u, theta):
+            return config["get_initial_state"](y_meas, u, theta)
+        CustomSystem.get_initial_state = get_initial_state
+    else:
+        def get_initial_state(self, y_meas, u, theta):
+            return y_meas
+        CustomSystem.get_initial_state = get_initial_state 
 
     # Создаём систему
     system = CustomSystem(**config.get("system_kwargs", {}))
@@ -120,17 +149,25 @@ def test_mhe_identification(system_config, tmp_path):
     )
 
     def get_window(i):
-        return t_windows[i], u_windows[i], meas_windows[i]
+        return t_windows[i], u_windows[i], meas_windows[i], _
 
     # Initial guess for parameters (slightly perturbed)
     initial_theta = config["initial_params"]
 
     # Run MHE estimation
-
+    reset_mhe_solver(generator.get_model(), 
+                    acados_solver,
+                    u_windows[0],
+                    system.get_initial_state(meas_windows[0][0], u_windows[0][0], initial_theta),
+                    initial_theta,
+                    N_meas
+                    )
+    
     results = run_mhe_estimation(
         mhe_model=generator.get_model(),
         acados_solver_factory=acados_solver,
         get_window_func=get_window,
+        get_initial_state_func=system.get_initial_state,
         overlap_points=overlap_points,
         initial_theta=initial_theta,
         mhe_params=mhe_params,

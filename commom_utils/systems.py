@@ -97,8 +97,6 @@ class DelaySystem(ODESystem):
             x2 = state[1]
             return u - tau_safe * x2
         
-    def get_input_signals(self, t):
-        return [jnp.sin(0.2*t)]
     
 class LateralCarDynamic(ODESystem):
     def __init__(self, wheelbase):
