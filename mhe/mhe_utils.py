@@ -257,9 +257,12 @@ def plot_mhe_results(results, overlap=0, initial_params=None, theta_true=None,
 
         if p == 'states':
             ax.set_title("States: Measured (dashed) vs Estimated (solid)")
-            nx = measured_full.shape[1]
-            for i in range(nx):
+            n_obs = measured_full.shape[1]
+            n_x = estimated_full.shape[1]
+            for i in range(n_obs):
                 ax.plot(t_full, measured_full[:, i], '--', label=f'Meas y_{i+1}')
+
+            for i in range(n_x):
                 ax.plot(t_full, estimated_full[:, i], '-', label=f'Est x_{i+1}')
             ax.set_xlabel("Time")
             ax.set_ylabel("State")

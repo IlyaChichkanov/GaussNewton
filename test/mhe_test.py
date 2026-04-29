@@ -33,13 +33,14 @@ SYSTEM_CONFIGS = {
     "KinematicBicycle": {
         "system_class": KinematicBycicle,
         "get_input_signals": lambda t: get_input_signals_bycicle(t), 
+        "get_initial_state": lambda y_meas, u, theta: y_meas[0:1],
         "system_kwargs": {"wheelbase": 2.65},
         "true_params": np.array([0.05, np.deg2rad(-0.3)]),  # [v, steering_angle]
         "initial_params": np.array([0.02, np.deg2rad(2.3)]),
         "initial_state": np.array([0.0]),                   # [x] or [position]
         "state_prior_q0": np.diag([1.0]),
         "noise_penalty_w": np.eye(1) * 1e3,
-        "measurements_residual_r": np.diag([1.0]),
+        "measurements_residual_r": np.diag(2*[1.0]),
         "fim_scaler": 0.2,
         "bounds_param": [np.deg2rad([-5, 5]), [-1, 1]],
         "bounds_state": [[-np.inf, np.inf]],

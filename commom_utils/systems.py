@@ -207,8 +207,9 @@ class MassSpringDamper(ODESystem):
    
 class KinematicBycicle(ODESystem):
     def __init__(self, wheelbase):
-        super().__init__(nx=1, nu=2, np=2)
         self.wheelbase = wheelbase
+        super().__init__(nx=1, nu=2, np=2)
+        
 
     def get_derivative(self, state, params, input_signals):
         psi = state[0]
@@ -219,7 +220,37 @@ class KinematicBycicle(ODESystem):
         rwa = GR * steering + offset
         dpsi = vx * ca.tan(rwa) / self.wheelbase
         return ca.vertcat(dpsi)
+    
+    def observation(self, state, params, input_signals):
+        GR = params[0]
+        offset = params[1]
+        v = input_signals[0]
+        steering = input_signals[1]
+        rwa = GR * steering + offset
+        w = v * ca.tan(rwa) / self.wheelbase
+        return vertcat(state, w)
+    
+class OffsetEstimator(ODESystem):
+    def __init__(self, wheelbase, gear_ratio):
+        self.wheelbase = wheelbase
+        self.GR = 1/gear_ratio
+        super().__init__(nx=1, nu=2, np=1)
 
+    def get_derivative(self, state, params, input_signals):
+        offset = params[0]
+        v = input_signals[0]
+        steering = input_signals[1]
+        rwa = self.GR * steering + offset
+        dpsi = v * ca.tan(rwa) / self.wheelbase
+        return dpsi
+    
+    def observation(self, state, params, input_signals):
+        offset = params[0]
+        v = input_signals[0]
+        steering = input_signals[1]
+        rwa = self.GR * steering + offset
+        w = v * ca.tan(rwa) / self.wheelbase
+        return w
 
 class KinematicBycicleActuator(ODESystem):
     def __init__(self, wheelbase, kp = 80.9, kv = 80.61):
