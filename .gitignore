@@ -39,3 +39,6 @@ venv.bak/
 # Custom user directories
 mhe/tmp_generated/.venv/
 mhe/tmp_generated/
+
+mpc/tmp_generated/.venv/
+mpc/tmp_generated/

@@ -16,7 +16,7 @@ Additionally, the code supports **Moving Horizon Estimation (MHE)** – a recurs
 To first run use command uv sync
 
 Pytest run by command: 
-1) uv run pytest test/gauss_newton_test.py -v
-2) uv run pytest test/mhe_test.py -v
+1) uv run pytest pytests/gauss_newton_test.py -v
+2) uv run pytest pytests/mhe_test.py -v
 
 ![gauss newton visualisation](gauss_newton/demo.gif)
