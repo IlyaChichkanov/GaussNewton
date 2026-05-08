@@ -35,6 +35,86 @@ class ODESystem:
         return []
 
 
+class SystemItegrator:
+    def __init__(self, system: ODESystem):
+        # Получаем символьные переменные и выражения
+        state_var, theta_var, inp_signal_var, f = system.get_system()
+        h_observ = system.observation(state_var, theta_var, inp_signal_var)
+
+        # Списки элементов для CasADi функций
+        state_list = state_var.elements()
+        inp_list = inp_signal_var.elements()
+        theta_list = theta_var.elements()
+
+        self.nu = len(inp_list)
+        self.nx = len(state_list)
+        self.n_p = len(theta_list)
+        self.n_obs = len(h_observ.elements())
+
+
+        self.df_dt = Function('func', [*state_list, *theta_list, *inp_list], [f])
+        self.df_dt_jax = convert(self.df_dt)
+        
+
+        JacA = jacobian(f, vertcat(*state_list))
+        self.jacA = Function('J_a', [*state_list, *theta_list, *inp_list], [JacA])
+        JacB = jacobian(f, vertcat(*inp_list))
+        self.jacB = Function('J_b', [*state_list, *theta_list, *inp_list], [JacB])
+
+        JacD = jacobian(f, vertcat(*theta_list))
+        self.jacD = Function('J_D', [*state_list, *theta_list, *inp_list], [JacD])
+
+
+    def df_dx(self, state, params, u):
+        return np.array(self.df_dt(*[*state, *params, *u])).T[0]
+
+    def df_dx_jax(self, state, t, u, params):
+        return jnp.array(self.df_dt_jax(*state, *params, *u)).flatten()
+
+    def step(self, c0, u, params, dt):
+        assert len(c0) == self.nx
+        assert len(u) == self.nu
+        assert len(params) == self.n_p
+        system = lambda t, y: self.df_dx(y, params, u)   
+        solution1 = solve_ivp(
+            system,
+            (0, dt),
+            c0,
+            method='RK45' 
+        )
+        return solution1.y.T[-1]
+
+    def step_jax(self, c0, u, params, dt):
+        assert len(c0) == self.nx
+        assert len(u) == self.nu
+        assert len(params) == self.n_p
+        solution = odeint(self.df_dx_jax, c0, jnp.array([0.0, dt]), u, params)
+        return np.array(solution[-1])
+
+    def integrate(self, c0, u, params, t_span):
+        assert len(c0) == self.nx
+        assert len(u) == self.nu
+        assert len(params) == self.n_p
+        system = lambda t, y: self.df_dx(y, params, u)   
+        solution1 = solve_ivp(
+            system,
+            t_span,
+            c0,
+            method='RK45' 
+        )
+        return solution1.y.T
+
+
+    def get_lin_system_dynamics(self, state, u, params):
+        assert len(state) == self.nx
+        assert len(u) == self.nu
+        assert len(params) == self.n_p
+        A = np.array(self.jacA(*state, *u, *params))#[0]
+        B = np.array(self.jacB(*state, *u, *params))#[0]
+        D = np.array(self.jacD(*state, *u, *params))#[0]
+        return A, B, D
+
+
 class SystemJacobian:
     """
     Класс для вычисления правых частей, якобианов и интегрирования системы.

@@ -108,18 +108,15 @@ class LateralCarDynamic(ODESystem):
         a0, a1, b0, b1 = theta[0], theta[1], theta[2], theta[3]
         steering, vx = u[0], u[1]
         GR = 10
-        alpha_f = np.atan2(vy + self.wheelbase * wz, vx)
-        alpha_r = np.atan2(vy , vx) #(vy )/ vx
+        # alpha_f = np.atan2(vy + self.wheelbase * wz, vx)
+        # alpha_r = np.atan2(vy , vx) #(vy )/ vx
+        alpha_f = (vy + self.wheelbase * wz)/vx
+        alpha_r = (vy )/ vx
         rwa = steering/GR 
         vy_dot = a0 * (rwa - alpha_f) +  a1 * alpha_r - vx * wz 
         wz_dot = b0 * (rwa - alpha_f) +  b1 * alpha_r
         f = vertcat(vy_dot, wz_dot)
         return f
-    
-    def get_input_signals(self, t):
-        w = 0.7
-        u = 0.04 * jnp.cos(t*0.25*w) * jnp.sin(w*t) 
-        return [u, 10.0]
 
     def observation(self, state, theta, u):
         return state
@@ -277,7 +274,44 @@ class KinematicBycicleActuator(ODESystem):
         # измеряем только курс
         return state[0]
 
+class KinematicModelDelay(ODESystem):
+    def __init__(self, wheelbase: float, order: int):
+        self.wheelbase = wheelbase
 
+        self.delay = DelaySystem(order=order)
+        nx_total = 1 + self.delay.nx
+        np_total = 2 + self.delay.np  
+        nu_total = 2                
+        super().__init__(nx=nx_total, np=np_total, nu=nu_total)
+
+    def get_derivative(self, state, params, input_signals):
+        psi = state[0]
+        state_delay = state[1:]
+        tau_d = params[2]
+
+        steering_cmd = input_signals[1]
+        dx_delay = self.delay.get_derivative(state_delay, [tau_d], steering_cmd)
+        dpsi = self.bycicle_dynamics(state, params, input_signals)
+        return ca.vertcat(dpsi, dx_delay)
+
+    def bycicle_dynamics(self, state, params, input_signals):
+        GR = params[0]
+        offset = params[1]
+        tau_d = params[2]
+        state_delay = state[1:]
+        
+        vx = input_signals[0]
+        steering_cmd = input_signals[1]
+        steering_cmd_delayed = self.delay.observation(state_delay, [tau_d], steering_cmd)
+        rwa = GR * steering_cmd_delayed + offset
+        #w = vx * ca.tan(rwa) / self.wheelbase
+        w = vx * rwa / self.wheelbase
+        return w
+
+    def observation(self, state, params, input_signals):
+        psi = state[0]
+        w = self.bycicle_dynamics(state, params, input_signals)
+        return vertcat(psi, w)
 
 class RosenzweigMacArthur(ODESystem):
     def __init__(self):

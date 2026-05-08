@@ -47,7 +47,7 @@ def reset_mhe_solver(mhe_model: MheModel,
 
     x_sim = initial_x0.copy()
 
-    integrate_f = mhe_model.create_intefrate_function(0.02, "integrate")
+    integrate_f = mhe_model.create_integrate_function(0.02, "integrate")
     for j in range(N):
         # Формируем расширенный вектор состояния + параметров
         x_aug = np.hstack((x_sim, initial_theta))
@@ -110,7 +110,7 @@ def run_mhe_estimation(
 
         # Обновляем накопленную точность (информационную матрицу)
         P_inv = forgetting_factor * P_inv + F_orig
-        F_reg, eig_orig, eig_reg = regularize_fim(P_inv, tau_ratio=1e-4, add_ridge=ridge_reg)
+        F_reg, eig_orig, eig_reg = regularize_fim(P_inv, tau_ratio=1e-4, ridge=ridge_reg)
         # if(len(F_reg) == 1):
         #     F_reg = np.array([[1.0]])
         # Настраиваем MHE с априорными параметрами и точностью
@@ -365,31 +365,19 @@ class MheEstimationData:
     sqp_iter: int            # number of SQP iterations
 
 
-def regularize_fim(F, tau_ratio=1e-4, zero_threshold=1e-3, large_penalty=1e6, add_ridge=1e-9):
-    """
-    Спектральная регуляризация FIM.
-    
-    Для собственных чисел < zero_threshold → заменяем на large_penalty (сильный приор).
-    Для собственных чисел < tau_ratio * max_eig, но >= zero_threshold → заменяем на tau.
-    """
+def regularize_fim(F, tau_ratio=1e-3, min_tau=1e-2, ridge=1.0):
     F = (F + F.T) / 2.0
     eigvals, eigvecs = la.eigh(F)
-    # сортируем по убыванию
     eigvals = eigvals[::-1]
     eigvecs = eigvecs[:, ::-1]
     
     max_eig = eigvals[0]
-    tau = max(tau_ratio * max_eig, 1e-12)
+    tau = max(tau_ratio * max_eig, min_tau)
     
-    new_eigvals = eigvals.copy()
-    for i, val in enumerate(eigvals):
-        if val < zero_threshold:
-            new_eigvals[i] = large_penalty
-        elif val < tau:
-            new_eigvals[i] = tau
-    
+    new_eigvals = np.maximum(eigvals, tau)   # для всех собственных чисел не меньше tau
     F_reg = eigvecs @ np.diag(new_eigvals) @ eigvecs.T
-    F_reg += add_ridge * np.eye(F.shape[0])
+    F_reg += ridge * np.eye(F.shape[0])
+    #F_reg = ridge * np.eye(F.shape[0])
     return F_reg, eigvals, new_eigvals
 
 def set_mhe_solver(mhe_model: MheModel, 
@@ -402,15 +390,12 @@ def set_mhe_solver(mhe_model: MheModel,
                P0 = np.array) -> tuple :
     assert(len(initial_x0) == mhe_model.state_length)
     assert(len(initial_theta) == mhe_model.param_length)
-    #nx = len(initial_x0)
+
     x_prior = np.hstack((initial_x0, initial_theta))
     for j in range(N):   
         p_ext = np.hstack((simU[j, :], simY[j, :], x_prior, P0.flatten()))
         acados_solver_mhe.set(j, "p", p_ext)
-        # if j == 0:
-        #     # Для первого узла используем переданное initial_x0 (которое уже должно быть согласовано)
-        #     x_aug = np.hstack((initial_x0, initial_theta))
-        #     acados_solver_mhe.set(j, "x", x_aug)
+
 
 def get_mhe_estimated_data(mhe_model: MheModel, acados_solver_mhe: AcadosOcpSolver, N: int):
     """

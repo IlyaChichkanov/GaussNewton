@@ -110,7 +110,7 @@ class MheModel(ABC):
                             ['x', 'theta', 'u'], ['x_next', 'Jx', 'Jtheta'])
         return step_func
     
-    def create_intefrate_function(self, dt, name) -> Function:
+    def create_integrate_function(self, dt, name) -> Function:
         print(f'create_step_function {name}')
         print(self.param_length)
         x = SX.sym('x', self.state_length)
