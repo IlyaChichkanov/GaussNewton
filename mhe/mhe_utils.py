@@ -53,12 +53,6 @@ def reset_mhe_solver(mhe_model: MheModel,
         x_aug = np.hstack((x_sim, initial_theta))
         acados_solver_mhe.set(j, "x", x_aug)
 
-        # Делаем шаг вперёд по дискретной динамике
-        if j < N - 1:
-            x_sim = np.array(integrate_f(x_sim, initial_theta, simU[j, :])).T[0]
-
-
-
 
 def run_mhe_estimation(
     mhe_model,
@@ -165,6 +159,71 @@ def run_mhe_estimation(
 
     return results
 
+def plot_mhe_data_windows(t_windows, u_windows, meas_windows, full_windows=None,
+                          max_windows=4, state_idx=None):
+    """
+    Визуализация окон MHE: каждое окно в отдельной строке (subplot).
+
+    Параметры:
+    t_windows, u_windows, meas_windows : списки массивов по окнам
+    full_windows : список истинных состояний (если есть, для отладки) – форма (N, nx)
+    max_windows : число окон для отображения
+    state_idx : список индексов состояний для отображения (по умолчанию все)
+    """
+    n_windows = min(len(t_windows), max_windows)
+    n_states = meas_windows[0].shape[1]  # измерений (обычно = nx или меньше)
+    n_controls = u_windows[0].shape[1] if u_windows[0].ndim > 1 else 1
+    
+    if state_idx is None:
+        state_idx = list(range(n_states))
+
+    # Определяем количество subplot'ов по вертикали: по одному на окно
+    fig, axs = plt.subplots(n_windows, 1, figsize=(12, 3 * n_windows),
+                            sharex=True, squeeze=False)
+    axs = axs.flatten()
+
+    for i in range(n_windows):
+        ax = axs[i]
+        t = t_windows[i]
+        u = u_windows[i]
+        meas = meas_windows[i]
+        full = full_windows[i] if full_windows is not None else None
+
+        # Измерения
+        for j, s_idx in enumerate(state_idx):
+            ax.plot(t, meas[:, s_idx], 'o-', markersize=3,
+                    label=f'Meas state {s_idx}', alpha=0.8)
+
+        # Истинные состояния (если переданы)
+        if full is not None:
+            for j, s_idx in enumerate(state_idx):
+                ax.plot(t, full[:, s_idx], '--', linewidth=1.5,
+                        label=f'True state {s_idx}', alpha=0.7)
+
+        # Управляющие сигналы (рисуем на том же графике или на twinx)
+        # Для наглядности используем правую ось
+        ax2 = ax.twinx()
+        for j in range(n_controls):
+            u_vals = u[:, j] if u.ndim > 1 else u
+            ax2.plot(t, u_vals, '--', color='gray', alpha=0.5,
+                     label=f'control_input_{j}')
+        ax2.set_ylabel('Control', color='gray')
+        ax2.tick_params(axis='y', labelcolor='gray')
+
+        ax.set_ylabel(f'Window {i}')
+        ax.grid(True, alpha=0.3)
+        # Легенда только для первого окна, чтобы не загромождать
+        if i == 0:
+            lines1, labels1 = ax.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax.legend(lines1 + lines2, labels1 + labels2, loc='upper right',
+                      fontsize=9)
+
+    axs[-1].set_xlabel('Time (s)')
+    plt.suptitle('MHE data windows', fontsize=14)
+    plt.tight_layout()
+    plt.show()
+    
 def plot_mhe_results(results, overlap=0, initial_params=None, theta_true=None,
                      plot_states=True, plot_params=True,
                      plot_eigvals=True, plot_noise=True,
@@ -439,3 +498,25 @@ def get_mhe_estimated_data(mhe_model: MheModel, acados_solver_mhe: AcadosOcpSolv
         cost_value=cost_value,
         sqp_iter=sqp_iter
     )
+
+def make_system_trajectory(mhe_model: MheModel, 
+               simU: np.array, 
+               initial_x0: np.array, 
+               initial_theta: np.array, 
+               N: int, dt: float) -> tuple :
+    assert(len(initial_x0) == mhe_model.state_length)
+    assert(len(initial_theta) == mhe_model.param_length)
+    assert simU.shape[0] >= N, f"simU должен содержать хотя бы {N} строк"
+
+    x_sim = initial_x0.copy()
+    trajectory = np.zeros((N + 1, mhe_model.state_length))
+    integrate_f = mhe_model.create_integrate_function(dt, "integrate")
+    trajectory[0] = x_sim
+    for j in range(N):
+        # Формируем расширенный вектор состояния + параметров
+        x_aug = np.hstack((x_sim, initial_theta))
+        # Делаем шаг вперёд по дискретной динамике
+        if j < N - 1:
+            x_sim = np.array(integrate_f(x_sim, initial_theta, simU[j, :])).T[0]
+        trajectory[j + 1] = x_sim
+    return trajectory

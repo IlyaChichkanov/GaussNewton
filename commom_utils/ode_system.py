@@ -48,7 +48,7 @@ class SystemItegrator:
 
         self.nu = len(inp_list)
         self.nx = len(state_list)
-        self.n_p = len(theta_list)
+        self.np = len(theta_list)
         self.n_obs = len(h_observ.elements())
 
 
@@ -74,7 +74,7 @@ class SystemItegrator:
     def step(self, c0, u, params, dt):
         assert len(c0) == self.nx
         assert len(u) == self.nu
-        assert len(params) == self.n_p
+        assert len(params) == self.np
         system = lambda t, y: self.df_dx(y, params, u)   
         solution1 = solve_ivp(
             system,
@@ -87,14 +87,14 @@ class SystemItegrator:
     def step_jax(self, c0, u, params, dt):
         assert len(c0) == self.nx
         assert len(u) == self.nu
-        assert len(params) == self.n_p
+        assert len(params) == self.np
         solution = odeint(self.df_dx_jax, c0, jnp.array([0.0, dt]), u, params)
         return np.array(solution[-1])
 
     def integrate(self, c0, u, params, t_span):
         assert len(c0) == self.nx
         assert len(u) == self.nu
-        assert len(params) == self.n_p
+        assert len(params) == self.np
         system = lambda t, y: self.df_dx(y, params, u)   
         solution1 = solve_ivp(
             system,
@@ -108,7 +108,7 @@ class SystemItegrator:
     def get_lin_system_dynamics(self, state, u, params):
         assert len(state) == self.nx
         assert len(u) == self.nu
-        assert len(params) == self.n_p
+        assert len(params) == self.np
         A = np.array(self.jacA(*state, *u, *params))#[0]
         B = np.array(self.jacB(*state, *u, *params))#[0]
         D = np.array(self.jacD(*state, *u, *params))#[0]
@@ -140,9 +140,9 @@ class SystemJacobian:
         inp_list = inp_signal_var.elements()
         theta_list = theta_var.elements()
 
-        self.inp_signal_len = len(inp_list)
+        self.nu = len(inp_list)
         self.nx = len(state_list)
-        self.n_p = len(theta_list)
+        self.np = len(theta_list)
         self.n_obs = len(h_observ.elements())
 
         # --- Создание CasADi функций ---
@@ -167,7 +167,7 @@ class SystemJacobian:
         self.compute_jacobian_x_jax = convert(Function('J_x', [*state_list, *inp_list, *theta_list], [J_x]), compile=True)
 
         # Константы для индексации расширенного состояния (чувствительности)
-        self._IDX_JX = slice(self.nx, self.nx + self.nx * self.n_p)
+        self._IDX_JX = slice(self.nx, self.nx + self.nx * self.np)
         self._IDX_JC = slice(self._IDX_JX.stop, self._IDX_JX.stop + self.nx * self.nx)
 
     # ----------------------------------------------------------------------
@@ -179,11 +179,11 @@ class SystemJacobian:
             return self.f_sym.get_input_signals(t)
         except Exception as e:
             print(f'Ошибка получения входов при t={t}: {e}')
-            return np.zeros(self.inp_signal_len)
+            return np.zeros(self.nu)
 
     def get_dimentions(self):
         """Возвращает размерности: (state_len, theta_len, meas_len)."""
-        return self.nx, self.n_p, self.n_obs
+        return self.nx, self.np, self.n_obs
 
     # ----------------------------------------------------------------------
     # Методы для обычного режима (NumPy)
@@ -267,7 +267,7 @@ class SystemJacobian:
     def get_solution(self, c0, theta, t_eval):
         """Интегрирование только состояния (обычный режим)."""
         def system(t, y):
-            return self.f_x_theta(y, t, theta[:self.n_p])
+            return self.f_x_theta(y, t, theta[:self.np])
 
         sol = solve_ivp(system, (t_eval[0], t_eval[-1]), c0,
                         t_eval=t_eval, method=self.method,
@@ -279,7 +279,7 @@ class SystemJacobian:
     def get_jacobian_solution(self, c0, theta, t_eval):
         """Интегрирование расширенной системы (состояние + чувствительности) (обычный режим)."""
         n = self.nx
-        p = self.n_p
+        p = self.np
 
         J0 = np.concatenate([np.zeros((n, p)).flatten(), np.eye(n).flatten()])
         y0 = np.concatenate([c0, J0])
@@ -310,13 +310,13 @@ class SystemJacobian:
         sol = odeint(self.f_x_theta_jax,
                      jnp.array(c0),
                      jnp.array(t_eval),
-                     *theta[:self.n_p])
+                     *theta[:self.np])
         return np.array(sol).T
 
     def get_jacobian_solution_jax(self, c0, theta, t_eval):
         """JAX-интегрирование расширенной системы (состояние + чувствительности)."""
         n = self.nx
-        p = self.n_p
+        p = self.np
 
         J0 = jnp.concatenate([jnp.zeros((n, p)).flatten(), jnp.eye(n).flatten()])
         y0 = jnp.concatenate([jnp.array(c0), J0])
@@ -330,7 +330,7 @@ class SystemJacobian:
     def _jacobian_x(self, state, t, theta):
         """Вычисляет производную матрицы Jx (чувствительности по параметрам)."""
         x = state[:self.nx]
-        Jx = state[self._IDX_JX].reshape((self.nx, self.n_p))
+        Jx = state[self._IDX_JX].reshape((self.nx, self.np))
         dJx = self.df_dx(x, t, theta) @ Jx + self.df_dtheta(x, t, theta)
         return dJx.flatten()
 
@@ -352,7 +352,7 @@ class SystemJacobian:
     def _jacobian_x_jax(self, state, t, theta):
         """JAX-версия производной Jx."""
         x = state[:self.nx]
-        Jx = state[self._IDX_JX].reshape((self.nx, self.n_p))
+        Jx = state[self._IDX_JX].reshape((self.nx, self.np))
         dJx = self.df_dx_jax(x, t, theta) @ Jx + self.df_dtheta_jax(x, t, theta)
         return dJx.flatten()
 
@@ -479,7 +479,7 @@ class SyntheticDataGenerator:
 
         # Вычисляем измерения
         measurements = np.zeros((n_measurements, self.meas_len))
-        inp_signal = np.zeros((n_measurements, self.system.inp_signal_len))
+        inp_signal = np.zeros((n_measurements, self.system.nu))
         for i, state in enumerate(noisy_states):
             measurements[i] = self.system.h_x(state, t_eval[i], theta)
             inp_signal[i] = self.system.f_sym.get_input_signals(t_eval[i])
@@ -587,7 +587,7 @@ class MHESyntheticDataGenerator:
             measured[i] = self.system.h_x(state, t[i], theta)
            
 
-        return t, u, noisy_full, measured
+        return t, u, full_states, noisy_full, measured
 
     def generate_sliding_windows_exact(self, c0, theta, t0, tf, num_windows,
                                        n_measurement, overlap_points=1, sigma=None):
@@ -623,7 +623,7 @@ class MHESyntheticDataGenerator:
         t_long = np.linspace(t0, t0 + (num_windows - 1) * step * dt + tf, total_points)
 
         # Generate the long trajectory
-        t_long, u_long, full_long, meas_long = self._generate_trajectory(
+        t_long, u_long, full_long, full_long_noise, meas_long = self._generate_trajectory(
             c0, theta, t_long, sigma
         )
 
@@ -645,8 +645,8 @@ class MHESyntheticDataGenerator:
     
 
 def check_system_ok(system_ode : ODESystem):
-            # Проверяем наличие необходимых методов
     system = SystemJacobian(system_ode)
+    assert system.nu == len(system_ode.get_input_signals(0))
     if not hasattr(system, 'get_dimentions'):
         raise AttributeError("system должен иметь метод get_dimentions()")
 

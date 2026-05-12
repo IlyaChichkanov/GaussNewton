@@ -106,7 +106,7 @@ class LateralCarDynamic(ODESystem):
     def get_derivative(self, state, theta, u):
         vy, wz = state[0], state[1]
         a0, a1, b0, b1 = theta[0], theta[1], theta[2], theta[3]
-        steering, vx = u[0], u[1]
+        vx, steering = u[0], u[1]
         GR = 10
         # alpha_f = np.atan2(vy + self.wheelbase * wz, vx)
         # alpha_r = np.atan2(vy , vx) #(vy )/ vx
