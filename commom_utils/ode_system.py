@@ -587,7 +587,7 @@ class MHESyntheticDataGenerator:
             measured[i] = self.system.h_x(state, t[i], theta)
            
 
-        return t, u, full_states, noisy_full, measured
+        return t, u, noisy_full, measured
 
     def generate_sliding_windows_exact(self, c0, theta, t0, tf, num_windows,
                                        n_measurement, overlap_points=1, sigma=None):
@@ -623,7 +623,7 @@ class MHESyntheticDataGenerator:
         t_long = np.linspace(t0, t0 + (num_windows - 1) * step * dt + tf, total_points)
 
         # Generate the long trajectory
-        t_long, u_long, full_long, full_long_noise, meas_long = self._generate_trajectory(
+        t_long, u_long, full_long, meas_long = self._generate_trajectory(
             c0, theta, t_long, sigma
         )
 
@@ -645,6 +645,7 @@ class MHESyntheticDataGenerator:
     
 
 def check_system_ok(system_ode : ODESystem):
+
     system = SystemJacobian(system_ode)
     assert system.nu == len(system_ode.get_input_signals(0))
     if not hasattr(system, 'get_dimentions'):

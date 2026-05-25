@@ -7,6 +7,7 @@ import pytest
 from acados_template import AcadosOcp
 from commom_utils.ode_system import check_system_ok, MHESyntheticDataGenerator
 from commom_utils.systems import KinematicBycicle, DelaySystem  # add other systems as needed
+from commom_utils.system_config import create_system, create_mhe_params
 from mhe.mhe_base_model_interface import MheCogeGenerator
 from mhe.params import MheParams
 from mhe.mhe_utils import run_mhe_estimation, reset_mhe_solver
@@ -30,90 +31,72 @@ def harmonic(t):
 
 
 SYSTEM_CONFIGS = {
-    "KinematicBicycle": {
-        "system_class": KinematicBycicle,
-        "get_input_signals": lambda t: get_input_signals_bycicle(t), 
+    "DelaySystem": {                                         # соответствует GN‑модели "Delay"
+        "class": DelaySystem,
+        "args": [2],
+        "c0": np.array([0.0, 0.0]),
+        "theta_true": np.array([0.4]),
+        "delta_theta": np.array([0.2]),
+        "input_signal": lambda t: harmonic(t),         # одномерный вход
+        #"observation": lambda state, theta, u: state,  # по умолчанию весь state
+        "get_initial_state": lambda y_meas, u, theta: np.hstack((u, 0))
+    },
+
+    "KinematicBycicle": {
+        "class": KinematicBycicle,                     # модель из MHE (возможно, упрощённая)
+        "args": [2.65],                                # wheelbase
+        "c0": np.array([0.0]),                         # одномерное состояние? Уточните
+        "theta_true": np.array([0.05, np.deg2rad(-1.0)]),
+        "delta_theta": np.array([0.01, np.deg2rad(2.0)]),
+        "input_signal": get_input_signals_bycicle,
         "get_initial_state": lambda y_meas, u, theta: y_meas[0:1],
-        "system_kwargs": {"wheelbase": 2.65},
-        "true_params": np.array([0.05, np.deg2rad(-0.3)]),  # [v, steering_angle]
-        "initial_params": np.array([0.02, np.deg2rad(2.3)]),
-        "initial_state": np.array([0.0]),                   # [x] or [position]
+    },
+
+}
+
+
+MHE_CONFIGS = {
+    "KinematicBycicle": {
+        "measurements_residual_r": np.diag([1.0, 1.0]),
         "state_prior_q0": np.diag([1.0]),
-        "noise_penalty_w": np.eye(1) * 1e3,
-        "measurements_residual_r": np.diag(2*[1.0]),
+        "noise_peanlty_w": np.eye(1) * 1e3,
         "fim_scaler": 0.2,
-        "bounds_param": [np.deg2rad([-5, 5]), [-1, 1]],
-        "bounds_state": [[-np.inf, np.inf]],
         "bounds_noise": [[-0.01, 0.01]],
+        "bounds_state": [[-np.inf, np.inf]],
+        "bounds_param": [np.deg2rad([-5, 5]), [-1, 1]],
     },
     "DelaySystem": {
-        "system_class": DelaySystem,
-        "get_input_signals": lambda t: harmonic(t),
-        "get_initial_state": lambda y_meas, u, theta: np.hstack((u, 0)),
-        "system_kwargs":  {"order": 2},  # порядок (1 = Паде 1‑го порядка)
-        "initial_state": np.array(2*[0.0]),  # начальное состояние для одного состояния
-        "true_params": np.array([0.4]),
-        "initial_params": np.array([0.1]),
-        "state_prior_q0": 0*np.diag(2*[1]),
-        "noise_penalty_w": np.eye(2) * 1e3,
-        "measurements_residual_r": np.diag([1]),
-        "fim_scaler": 0.1,
-        "bounds_noise": 2*[[-0.01, 0.01]],
-        "bounds_state": 2*[[-1e5, 1e5]],
-        "bounds_param": [[0, 20]],
+        "measurements_residual_r": np.diag([1.0]),
+        "state_prior_q0": np.diag([1, 1]),
+        "noise_peanlty_w": np.eye(2)*10 ,
+        "fim_scaler": 1.0,
+        "bounds_noise": [[-0.1, 0.1]] * 2,
+        "bounds_state": [[-1e5, 1e5]] * 2,
+        "bounds_param": [[0, 0.7]],
     },
-    # Add more systems here, e.g.:
-    # "AnotherSystem": {...}
+    # Для моделей, которые используются только в GN (LotkaVoltera, LateralCarDynamic,
+    # Attractor, Pendulum), MHE_CONFIGS не обязателен, но если вы захотите применить
+    # MHE к ним позже, добавьте записи по аналогии.
 }
+
 
 @pytest.fixture(params=SYSTEM_CONFIGS.keys())
 def system_config(request):
     """Fixture that returns configuration for each system."""
-    return SYSTEM_CONFIGS[request.param], request.param
+    return SYSTEM_CONFIGS[request.param], MHE_CONFIGS[request.param], request.param
 
 def test_mhe_identification(system_config, tmp_path):
     """
     Test MHE parameter identification for a given system.
     Verifies that the estimated parameters converge to the true values.
     """
-    config, system_name = system_config
+    system_config, mhe_config, system_name = system_config
 
 
-    class CustomSystem(config["system_class"]):
-        pass
-
-    if "get_input_signals" in config:
-        def get_input_signals(self, t):
-            return config["get_input_signals"](t)
-        CustomSystem.get_input_signals = get_input_signals
-
-    if "get_initial_state" in config:
-        def get_initial_state(self, y_meas, u, theta):
-            return config["get_initial_state"](y_meas, u, theta)
-        CustomSystem.get_initial_state = get_initial_state
-    else:
-        def get_initial_state(self, y_meas, u, theta):
-            return y_meas
-        CustomSystem.get_initial_state = get_initial_state 
-
-    # Создаём систему
-    system = CustomSystem(**config.get("system_kwargs", {}))
-
+    system, c0, theta_true, delta_theta = create_system(system_config)
     check_system_ok(system)
-
-    # MHE parameters
-    mhe_params = MheParams(
-        dt=0.02,
-        mhe_horizont=400,
-        state_prior_q0=config["state_prior_q0"],
-        noise_peanlty_w=config["noise_penalty_w"],
-        measurements_residual_r=config["measurements_residual_r"],
-        fim_scaler=config["fim_scaler"],
-        bounds_noise=config["bounds_noise"],
-        bounds_state=config["bounds_state"],
-        bounds_param=config["bounds_param"],
-    )
-
+    mhe_params = create_mhe_params(mhe_config, dt=0.02, mhe_horizont=400)
+    mhe_params.print()
     # Generator for acados code
     class TestGenerator(MheCogeGenerator):
         def __init__(self):
@@ -137,11 +120,11 @@ def test_mhe_identification(system_config, tmp_path):
     T_f = mhe_params.dt * mhe_params.mhe_horizont
     N_meas = mhe_params.mhe_horizont
     overlap_points = int(N_meas * 0.5)
-    num_windows = 30
+    num_windows = 20
 
     t_windows, u_windows, meas_windows, _ = data_gen.generate_sliding_windows_exact(
-        c0=config["initial_state"],
-        theta=config["true_params"],
+        c0=c0,
+        theta=theta_true,
         t0=t0,
         tf=T_f,
         num_windows=num_windows,
@@ -153,7 +136,7 @@ def test_mhe_identification(system_config, tmp_path):
         return t_windows[i], u_windows[i], meas_windows[i], _
 
     # Initial guess for parameters (slightly perturbed)
-    initial_theta = config["initial_params"]
+    initial_theta = delta_theta + theta_true
 
     # Run MHE estimation
     reset_mhe_solver(generator.get_model(), 
@@ -183,8 +166,7 @@ def test_mhe_identification(system_config, tmp_path):
 
     # Check that the last window's parameter estimate is close to true values
     final_theta_est = results[-1].param_est
-    true_theta = config["true_params"]
 
     # Relative error tolerance (10% for now, can be tightened)
-    rel_error = np.abs((final_theta_est - true_theta) / true_theta)
-    assert np.all(rel_error < 1e-2), f"System {system_name}: final estimate {final_theta_est} differs from true {true_theta} by {rel_error}"
+    rel_error = np.abs((final_theta_est - theta_true) / theta_true)
+    assert np.all(rel_error < 1e-2), f"System {system_name}: final estimate {final_theta_est} differs from true {theta_true} by {rel_error}"

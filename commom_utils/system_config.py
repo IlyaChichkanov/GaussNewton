@@ -6,6 +6,8 @@ def get_input_signals_bycicle(t):
     w = 2.7
     steering = 0.8 * jnp.cos(t * 0.25 * w) * jnp.sin(w * t)
     v = 10.0
+    if(t < 5):
+        steering = 0
     return [v, steering]          # порядок: steering, vx (как ожидает LateralCarDynamic)
 
 def harmonic(t):
@@ -132,35 +134,6 @@ SYSTEM_CONFIGS = {
 }
 
 
-def create_system(model_key: str):
-    """
-    Возвращает: system (объект ODESystem), c0 (np.array), theta_true (np.array),
-                delta_theta (np.array или None).
-    """
-    cfg = SYSTEM_CONFIGS[model_key]
-
-    class ConfiguredSystem(cfg["class"]):
-        pass
-
-    # observation (если не задано, оставляем стандартное поведение родителя)
-    if "observation" in cfg and cfg["observation"] is not None:
-        ConfiguredSystem.observation = lambda self, state, theta, u: cfg["observation"](state, theta, u)
-
-    # input_signals (если None, оставляем стандартный get_input_signals -> [])
-    if cfg.get("input_signal") is not None:
-        ConfiguredSystem.get_input_signals = lambda self, t: cfg["input_signal"](t)
-
-    # Дополнительный метод get_initial_state (для MHE, не мешает GN)
-    if "get_initial_state" in cfg and cfg["get_initial_state"] is not None:
-        ConfiguredSystem.get_initial_state = lambda self, y_meas, u, theta: cfg["get_initial_state"](y_meas, u, theta)
-    else:
-        ConfiguredSystem.get_initial_state = lambda self, y_meas, u, theta: y_meas
-
-    system = ConfiguredSystem(*cfg["args"])
-    return system, cfg["c0"].copy(), cfg["theta_true"].copy(), cfg.get("delta_theta")
-
-
-
 MHE_CONFIGS = {
     "LotkaVoltera": {
         "measurements_residual_r": np.diag([1.0, 1.0]),
@@ -182,7 +155,7 @@ MHE_CONFIGS = {
         "bounds_param": [[-2000, 2000]] * 2,
     },
     "KinematicBycicle": {
-        "measurements_residual_r": np.diag([1.0]),
+        "measurements_residual_r": np.diag([1.0, 1.0]),
         "state_prior_q0": np.diag([1.0]),
         "noise_peanlty_w": np.eye(1) * 1e3,
         "fim_scaler": 0.2,
@@ -231,11 +204,37 @@ MHE_CONFIGS = {
     # MHE к ним позже, добавьте записи по аналогии.
 }
 
+
+def create_system(cfg: dict):
+    """
+    Возвращает: system (объект ODESystem), c0 (np.array), theta_true (np.array),
+                delta_theta (np.array или None).
+    """
+    class ConfiguredSystem(cfg["class"]):
+        pass
+
+    # observation (если не задано, оставляем стандартное поведение родителя)
+    if "observation" in cfg and cfg["observation"] is not None:
+        ConfiguredSystem.observation = lambda self, state, theta, u: cfg["observation"](state, theta, u)
+
+    # input_signals (если None, оставляем стандартный get_input_signals -> [])
+    if cfg.get("input_signal") is not None:
+        ConfiguredSystem.get_input_signals = lambda self, t: cfg["input_signal"](t)
+
+    # Дополнительный метод get_initial_state (для MHE, не мешает GN)
+    if "get_initial_state" in cfg and cfg["get_initial_state"] is not None:
+        ConfiguredSystem.get_initial_state = lambda self, y_meas, u, theta: cfg["get_initial_state"](y_meas, u, theta)
+    else:
+        ConfiguredSystem.get_initial_state = lambda self, y_meas, u, theta: y_meas
+
+    system = ConfiguredSystem(*cfg["args"])
+    return system, cfg["c0"].copy(), cfg["theta_true"].copy(), cfg.get("delta_theta")
+
+
 from mhe.params import MheParams
 
-def create_mhe_params(model_key: str, dt: float, mhe_horizont: int):
+def create_mhe_params(mhe_cfg: dict, dt: float, mhe_horizont: int):
     """Создаёт объект MheParams на основе MHE_CONFIGS."""
-    mhe_cfg = MHE_CONFIGS[model_key]
     return MheParams(
         dt=dt,
         mhe_horizont=mhe_horizont,
