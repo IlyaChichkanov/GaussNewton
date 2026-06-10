@@ -71,7 +71,46 @@ class DoubleLaneChangeScenario(Scenario):
         f_curv = interpolate.interp1d(t_list, curv_arr, kind='linear')
         return TrajectoryTimeProfile(f_vel, f_curv, t_list)
 
+class StepCurveScenario(Scenario):
+    """
+    Ступенчатое изменение кривизны в заданный момент времени.
+    """
+    def __init__(self, velocity=10.0, step_magnitude=0.05, step_time=5.0):
+        self.v = velocity
+        self.step_magnitude = step_magnitude
+        self.step_time = step_time
 
+    def create_trajectory(self, t_list):
+        vel_arr = np.full_like(t_list, self.v)
+        curv_arr = np.zeros_like(t_list)
+        curv_arr[t_list >= self.step_time] = self.step_magnitude
+        f_vel = interpolate.interp1d(t_list, vel_arr, kind='linear')
+        f_curv = interpolate.interp1d(t_list, curv_arr, kind='linear')
+        return TrajectoryTimeProfile(f_vel, f_curv, t_list)
+
+
+class LaneChangeScenario(Scenario):
+    """
+    Один перестроение (например, в соседнюю полосу) с плавным переходом,
+    задаваемым сигмоидой (tanh).
+    """
+    def __init__(self, velocity=10.0, lane_width=3.5, change_duration=4.0):
+        self.v = velocity
+        self.lane_width = lane_width
+        self.duration = change_duration
+
+    def create_trajectory(self, t_list):
+        # Кривизна для перестроения: производная от sigmoid-функции (cosh)
+        # Простой вариант: колоколообразный импульс кривизны
+        vel_arr = np.full_like(t_list, self.v)
+        # Середина перестроения
+        t_center = t_list[-1] / 2
+        # Кривизна пропорциональна производной tanh
+        curv_arr = (self.lane_width / self.duration) * (1 / np.cosh((t_list - t_center) / self.duration)**2)
+        f_vel = interpolate.interp1d(t_list, vel_arr, kind='linear')
+        f_curv = interpolate.interp1d(t_list, curv_arr, kind='linear')
+        return TrajectoryTimeProfile(f_vel, f_curv, t_list)
+    
 class CustomSequenceScenario(Scenario):
     """
     Позволяет передать произвольные массивы скорости и кривизны (аналог вашего текущего подхода).
@@ -111,24 +150,27 @@ class VariableSpeedScenario(Scenario):
 
 class Simulator:
     def __init__(self, model: ODESystem, controller: Controller,
-                 trajectory, delay_cycles=0, use_jax=True):
+                 trajectory: TrajectoryTimeProfile, model_params: np.array, 
+                 delay_cycles=0, use_jax=True):
         self.integrator = SystemItegrator(model)
         self.controller = controller
         self.trajectory = trajectory
         self.delay_cycles = delay_cycles
         self.use_jax = use_jax
         self.nx = model.nx
-
-    def run(self, t_list, x0=None):
+        self.model_params = model_params
+    def run(self, t_list, x0=None, rwa_init_pose = 0):
         """
         Запуск симуляции.
         t_list: массив времён (N_sim+1 точек, включая начальное время)
         x0: начальное состояние (если None, то [0.1, 0.02])
         Возвращает states (N_sim+1 x nx), controls (N_sim x nu)
         """
+        
         if x0 is None:
             x0 = np.zeros(self.nx)
-
+        else:
+            assert len(x0) == self.nx
 
         N_sim = len(t_list) - 1
         states = np.zeros((N_sim + 1, self.nx))
@@ -142,7 +184,8 @@ class Simulator:
         # Если MPC, нужно предварительно настроить горизонт
         if self.controller.mpc_control():
             N = self.controller.solver.acados_ocp.dims.N
-    
+            self.controller.set_rwa_pos(rwa_init_pose)
+
         for i in range(N_sim):
             t = t_list[i]
             dt = t_list[i+1] - t  # фактический шаг
@@ -154,8 +197,7 @@ class Simulator:
 
             # Если MPC – обновляем параметры на всём горизонте
             if self.controller.mpc_control():
-                model_params = np.array([0.2, 0])  #delay offset
-                self.controller.set_horizon_params(t, dt, N, model_params)
+                self.controller.set_horizon_params(t, dt, N, self.model_params)
             else:
                 self.controller.set_params(params)
 

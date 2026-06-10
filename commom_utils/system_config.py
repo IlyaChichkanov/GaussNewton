@@ -6,7 +6,7 @@ def get_input_signals_bycicle(t):
     w = 2.7
     steering = 0.8 * jnp.cos(t * 0.25 * w) * jnp.sin(w * t)
     v = 10.0
-    if(t < 5):
+    if(t < 3):
         steering = 0
     return [v, steering]          # порядок: steering, vx (как ожидает LateralCarDynamic)
 
@@ -154,14 +154,23 @@ MHE_CONFIGS = {
         "bounds_state": [[-np.inf, np.inf]] * 2,
         "bounds_param": [[-2000, 2000]] * 2,
     },
+    "LateralCarDynamic": {
+        "measurements_residual_r": np.diag([1.0, 1.0]),
+        "state_prior_q0": np.diag([1.0, 1.0]),
+        "noise_peanlty_w": np.eye(2) * 1e3,
+        "fim_scaler": 0.2,
+        "bounds_noise": [[-0.01, 0.01], [-0.01, 0.01]],
+        "bounds_state": [[-np.inf, np.inf], [-100, 100]],
+        "bounds_param": [[-100, 100], [-100, 100], [-100, 100], [-100, 100]],
+    },
     "KinematicBycicle": {
         "measurements_residual_r": np.diag([1.0, 1.0]),
         "state_prior_q0": np.diag([1.0]),
         "noise_peanlty_w": np.eye(1) * 1e3,
-        "fim_scaler": 0.2,
+        "fim_scaler": 0.5,
         "bounds_noise": [[-0.01, 0.01]],
         "bounds_state": [[-np.inf, np.inf]],
-        "bounds_param": [np.deg2rad([-5, 5]), [-1, 1]],
+        "bounds_param": [[0.01, 0.2], np.deg2rad([-5, 5])],
     },
     "KinematicModelDelay": {
         "measurements_residual_r": np.diag([1.0, 3.0]),

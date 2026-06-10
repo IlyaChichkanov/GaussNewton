@@ -19,7 +19,6 @@ class MpcParams:
     use_dynamic_model: bool
     use_ddu_control: bool
     mpc_horizont: int
-    n_delay: int
     ts: float
     r_dist: float
     r_ang: float

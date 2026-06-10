@@ -107,7 +107,7 @@ class LateralCarDynamic(ODESystem):
         vy, wz = state[0], state[1]
         a0, a1, b0, b1 = theta[0], theta[1], theta[2], theta[3]
         vx, steering = u[0], u[1]
-        GR = 10
+        GR = 20
         # alpha_f = np.atan2(vy + self.wheelbase * wz, vx)
         # alpha_r = np.atan2(vy , vx) #(vy )/ vx
         alpha_f = (vy + self.wheelbase * wz)/vx
@@ -201,7 +201,22 @@ class MassSpringDamper(ODESystem):
         if t < 1:
             u = 0
         return [u]
-   
+
+class KinematicBycicleErrors(ODESystem):
+    def __init__(self, wheelbase):
+        self.wheelbase = wheelbase
+        super().__init__(nx=2, nu=1, np=2)
+        
+    def get_derivative(self, state, params, input_signals):
+        d = state[0]
+        psi = state[1]
+        rwa = input_signals[0]
+        vx = params[0]
+        c = params[1]
+        dd = vx * ca.sin(psi)
+        dpsi = vx * ca.tan(rwa) / self.wheelbase - vx * c * ca.cos(psi) / (1 - c * d)
+        return ca.vertcat(dd, dpsi)
+    
 class KinematicBycicle(ODESystem):
     def __init__(self, wheelbase):
         self.wheelbase = wheelbase

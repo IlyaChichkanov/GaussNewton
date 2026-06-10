@@ -66,13 +66,17 @@ class LateralMPCController(Controller):
     def __init__(self, solver, trajectory):  # траектория теперь обязательна
         self.solver = solver
         self.trajectory = trajectory
-
+        self.rwa_init_pos = 0
+        self.first_step = True
     def mpc_control(self) -> bool:
         return True
 
     def set_params(self, stage, param):
         # Установка параметров для конкретного шага горизонта
         self.solver.set(stage, 'p', param)
+
+    def set_rwa_pos(self, rwa_pos):
+        self.rwa_init_pos = rwa_pos
 
     def set_horizon_params(self, t, dt, N, model_param):
         """Заполняет параметры на весь горизонт по траектории."""
@@ -92,6 +96,9 @@ class LateralMPCController(Controller):
         psi = x_current[1]
         prev_x = self.solver.get(1, 'x')
         tail = prev_x[2:] if len(prev_x) > 2 else np.array([])
+        if(self.first_step):
+            tail[0] = self.rwa_init_pos
+            self.first_step = False
         return np.hstack([d_over_v, psi, tail])
 
     def compute_control(self, state, t, dt):

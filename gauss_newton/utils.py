@@ -411,7 +411,11 @@ def plot_solution(
 
             # Рисуем траекторию на верхней панели
             if is_single:
-                ax_state0.plot(t_dense, traj[:, 0], 'b-', alpha=0.7)
+                meas_traj = []
+                for t_, state in zip(t_dense, traj):
+                    meas_traj.append(problem.system.h_x(state, t_, theta))
+                meas_traj = np.array(meas_traj)
+                ax_state0.plot(t_dense, meas_traj, 'b-', alpha=0.7)
             else:
                 _plot_traj(ax_traj, traj, use_3d, color='blue', alpha=0.7)
 
