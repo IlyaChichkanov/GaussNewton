@@ -1,8 +1,6 @@
 import numpy as np
 from scipy.integrate import solve_ivp
 from commom_utils.ode_system import ODESystem, SystemJacobian
-import casadi as ca
-
 
 class TimeIntervalManager:
     def __init__(self, N_shoot, t_eval_measurements):
@@ -42,19 +40,17 @@ class MultipleShooting:
         self.state_measured_batches = []
         self.state_full_batches = []
         self.t_eval_measurements_batches = []
-
-        # Optional: store full trajectory for debugging
-        self.full_trajectory = None
-
+        self.interval_managers = []
     def add_batch(self, state_full, state_measured, t_eval_measurements):
         """Add a new batch of experimental data."""
         self.state_measured_batches.append(state_measured)
         self.state_full_batches.append(state_full)
         self.t_eval_measurements_batches.append(t_eval_measurements)
+        self.interval_managers.append(TimeIntervalManager(self.N_shoot, t_eval_measurements))
 
     def get_time_interval(self, shoot, batch):
         """Get time interval and measurement indices for a given shoot and batch."""
-        tm = TimeIntervalManager(self.N_shoot, self.t_eval_measurements_batches[batch])
+        tm = self.interval_managers[batch]
         return tm.get_time_interval(shoot)
 
     def make_full_theta_from_true(self, theta0):
@@ -105,12 +101,12 @@ class MultipleShooting:
                     c0_ = np.zeros(n_state)
                     c0_[:len(y_first)] = y_first
                 elif c0_init_method == 'inverse_h':
-                    # Приближённое обращение h
-                    # Начальное приближение для x можно взять нулевым
-                    if(np.isnan(c0_guess).any()):
-                        c0_guess = np.zeros(n_state)
+                    if c0_guess is None or np.any(np.isnan(c0_guess)):
+                        x0_guess = np.zeros(n_state)
+                    else:
+                        x0_guess = np.copy(c0_guess)
                     c0_ = self.system.inverse_h(y_first, t_first, theta0, 
-                                                x_guess=c0_guess, n_iter=n_iter)
+                                                x_guess=x0_guess, n_iter=n_iter)
                 else:
                     raise ValueError(f"Unknown c0_init_method: {c0_init_method}")
                 
@@ -165,14 +161,17 @@ class MultipleShooting:
         idx_theta = slice(0, n_state * n_theta)
         idx_c = slice(n_state * n_theta, n_state * (n_theta + n_state))
 
-        n_measurements = state_measured.shape[0]
-        tm = TimeIntervalManager(self.N_shoot, t_meas)
+        tm = self.interval_managers[batch_idx]
         n_shoot = tm.N_shoot
 
         # Preallocate arrays
-        J = np.zeros((n_measurements, n_meas, n_theta + n_shoot * n_state))
+        total_meas_points = sum(len(tm.get_time_interval(sh)[1]) for sh in range(n_shoot))
+        J = np.zeros((total_meas_points, n_meas, n_theta + n_shoot * n_state))
+        R = np.zeros((total_meas_points, n_meas))
+
+        J = np.zeros((total_meas_points, n_meas, n_theta + n_shoot * n_state))
         J_G = np.zeros((n_shoot - 1, n_state, n_theta + n_shoot * n_state))
-        R = np.zeros((n_measurements, n_meas))
+        R = np.zeros((total_meas_points, n_meas))
         R_G = np.zeros((n_shoot - 1, n_state))
 
         meas_row = 0          # current row index for measurements
@@ -211,15 +210,14 @@ class MultipleShooting:
                 J_c = dh_dx @ dx_dc
 
                 # Normalize by number of points in this interval
-                norm = len(meas_idx)
-                J[meas_row, :, :n_theta] = J_theta / norm
-                J[meas_row, :, n_theta + shoot * n_state : n_theta + (shoot + 1) * n_state] = J_c / norm
+                J[meas_row, :, :n_theta] = J_theta 
+                J[meas_row, :, n_theta + shoot * n_state : n_theta + (shoot + 1) * n_state] = J_c 
                 y_meas = state_measured[idx]
                 y_pred = self.system.h_x(state, t, theta_full[:n_theta])
-                R[meas_row] = (y_meas - y_pred) / norm
+                R[meas_row] = (y_meas - y_pred) 
 
                 # Apply weights if gamma is provided
-                if np.any(~np.isnan(self.gamma)):
+                if self.gamma is not None:
                     R[meas_row] *= self.gamma
                     J[meas_row] *= self.gamma[:, np.newaxis]
                     if i == 0:   # first point in interval gets extra weight
@@ -234,9 +232,6 @@ class MultipleShooting:
                 J_G[cont_row, :, n_theta + (shoot - 1) * n_state : n_theta + shoot * n_state] = Jc_prev
                 J_G[cont_row, :, n_theta + shoot * n_state : n_theta + (shoot + 1) * n_state] = -np.eye(n_state)
                 R_G[cont_row] = -(state_prev - c0)
-                # Note: original code also applied gamma to R_G/J_G in a strange way (used R[ind], J[ind] with ind out of range).
-                # This part is omitted because it was likely a bug. We keep original logic only for measurements.
-                # If needed, we can add similar weight application for continuity, but original did not.
                 cont_row += 1
 
             # Store data for next shoot
@@ -245,8 +240,8 @@ class MultipleShooting:
             state_prev = state_traj[:, -1]
 
         # Flatten the arrays
-        J_flat = J.reshape(n_measurements * n_meas, -1)
-        R_flat = R.reshape(n_measurements * n_meas)
+        J_flat = J.reshape(total_meas_points * n_meas, -1)
+        R_flat = R.reshape(total_meas_points * n_meas)
         J_G_flat = np.array([])
         R_G_flat = np.array([])
         if shoot > 0:
@@ -255,21 +250,12 @@ class MultipleShooting:
 
         return J_flat, J_G_flat, R_flat, R_G_flat
 
-    # Keep original method name for backward compatibility
-    def concantenate_jacobian(self, J1, J2):
-        """Alias for _concatenate_jacobians (maintains original method name)."""
-        return self._concatenate_jacobians(J1, J2)
-    
 
 
-
-# ---------- Функции для ковариации и доверительных интервалов ----------
 def compute_parameter_covariance(J, R, J_G, R_G, theta_full):
-    """Вычисляет ковариационную матрицу для всех оцениваемых параметров."""
     J_full = J
     R_full = R
-    multiple_shooting = len(J_G) > 0
-    if(multiple_shooting):
+    if len(J_G) > 0:
         J_full = np.vstack([J, J_G])
         R_full = np.hstack([R, R_G])
     residual_sum_squares = R_full @ R_full
@@ -277,11 +263,11 @@ def compute_parameter_covariance(J, R, J_G, R_G, theta_full):
     n_cont = J_G.shape[0]
     n_params = len(theta_full)
     dof = n_meas + n_cont - n_params
-    if dof <= 0:
-        raise ValueError(f"Недостаточно данных для оценки ковариации (dof={dof})")
+    # Защита: если степеней свободы меньше 1, используем 1, чтобы избежать деления на 0
+    dof = max(dof, 1)
     sigma2 = residual_sum_squares / dof
     H = J_full.T @ J_full
-    H_reg = H + 1e-8 * np.eye(n_params)   # регуляризация для устойчивости
+    H_reg = H + 1e-8 * np.eye(n_params)
     try:
         cov = sigma2 * np.linalg.inv(H_reg)
     except np.linalg.LinAlgError:
@@ -325,51 +311,86 @@ def compute_delta_gn(J, R, J_G, R_G, mu, lambda_, lambda_reg, theta_full, iter_n
         new_mu = mu
     return delta_theta, new_mu
 
-# ---------- Запуск оптимизации с вычислением ковариации ----------
 def run_optimization(problem, config, theta_full, system):
     import time
     theta_hist = [theta_full[:].copy()]
     r_meas_hist = []
     r_cont_hist = []
-    
-    # --- ДОБАВЛЯЕМ списки для истории доверительных интервалов ---
-    ci_low_hist = []   # каждый элемент: массив длины n_theta
+    ci_low_hist = []
     ci_high_hist = []
 
     mu = config.mu
-    n_theta = system.np   # число исходных параметров
+    n_theta = system.np
+
+    # Минимально допустимое mu (можно задать в config, иначе 1e-6)
+    mu_min = getattr(config, 'mu_min', 1e-6)
+
+    # Начальные невязки для сравнения
+    J, R, J_G, R_G = problem.solve(theta_full)
+    best_cost = np.sum(R**2) + np.sum(R_G**2)  # полная стоимость
 
     for it in range(config.n_iter):
         start = time.time()
-        J, R, J_G, R_G = problem.solve(theta_full)
-        elapsed = time.time() - start
 
-        meas_cost = system.nx * np.sum(R**2) / len(R)
-        cont_cost = system.nx * np.sum(R_G**2) / len(R_G)
-        print(f'Iter {it:3d} | time: {elapsed:.3f}s | R_meas: {meas_cost:.3e} | R_cont: {cont_cost:.3e}')
+        # Логирование текущей стоимости
+        meas_cost = np.sum(R**2) / max(1, len(R))
+        cont_cost = np.sum(R_G**2) / max(1, len(R_G)) if R_G.size > 0 else 0.0
+        print(f'Iter {it:3d} | time: {time.time()-start:.3f}s | '
+              f'R_meas: {meas_cost:.3e} | R_cont: {cont_cost:.3e} | mu: {mu:.2e}')
 
-        # --- ВЫЧИСЛЯЕМ КОВАРИАЦИЮ И CI ДЛЯ ТЕКУЩЕЙ ИТЕРАЦИИ ---
-        # (используем уже написанную функцию compute_parameter_covariance)
+        # Ковариация и доверительные интервалы (на текущих J, R)
         cov_full, _ = compute_parameter_covariance(J, R, J_G, R_G, theta_full)
-        # Число степеней свободы
         n_meas = J.shape[0]
         n_cont = J_G.shape[0]
-        dof = n_meas + n_cont - len(theta_full)
+        dof = max(1, n_meas + n_cont - len(theta_full))
         ci_low_full, ci_high_full = confidence_intervals(theta_full, cov_full, dof, alpha=0.05)
-        # Сохраняем только первые n_theta параметров
         ci_low_hist.append(ci_low_full[:n_theta])
         ci_high_hist.append(ci_high_full[:n_theta])
 
-        delta_theta, mu = compute_delta_gn(J, R, J_G, R_G, mu,
-                                           config.lambda_, config.lambda_reg,
-                                           theta_full, it)
-        theta_full = theta_full + delta_theta
-        theta_hist.append(theta_full[:].copy())
+        # Вычисляем предлагаемый шаг (пока без изменения mu)
+        delta_theta, new_mu = compute_delta_gn(
+            J, R, J_G, R_G, mu,
+            config.lambda_, config.lambda_reg,
+            theta_full, it
+        )
+
+        # Пробный вектор параметров
+        theta_trial = theta_full + delta_theta
+
+        # Проверяем на NaN в параметрах
+        if np.any(np.isnan(theta_trial)):
+            print("NaN в параметрах, остановка.")
+            break
+
+        # Оцениваем стоимость для пробного шага
+        J_trial, R_trial, J_G_trial, R_G_trial = problem.solve(theta_trial)
+        trial_cost = np.sum(R_trial**2) + np.sum(R_G_trial**2)
+
+        # Принимаем шаг только если стоимость уменьшилась (или не изменилась)
+        if not np.isnan(trial_cost) and trial_cost <= best_cost:
+            # Успех: применяем новые параметры и обновляем mu (но не ниже mu_min)
+            theta_full = theta_trial
+            best_cost = trial_cost
+            J, R, J_G, R_G = J_trial, R_trial, J_G_trial, R_G_trial
+            mu = max(new_mu, mu_min)   # не даём mu упасть слишком низко
+        else:
+            # Шаг плохой: откатываем, mu оставляем прежним
+            print(f"  Шаг отклонён (cost {trial_cost:.3e} > {best_cost:.3e}), mu сохранён {mu:.2e}")
+            # mu не меняется, оставляем старые J, R и theta_full
+
+        # Сохраняем историю (текущие theta_full и невязки)
+        theta_hist.append(theta_full.copy())
         r_meas_hist.append(meas_cost)
         r_cont_hist.append(cont_cost)
 
-    # Преобразуем списки в массивы для удобства
-    ci_low_hist = np.array(ci_low_hist)   # (n_iter, n_theta)
+        # Если mu достиг минимума и улучшений нет, можно остановиться
+        if mu <= mu_min and trial_cost > best_cost:
+            print("mu достиг нижней границы, улучшений нет – остановка.")
+            break
+
+        elapsed = time.time() - start
+
+    ci_low_hist = np.array(ci_low_hist)
     ci_high_hist = np.array(ci_high_hist)
 
     return theta_hist, r_meas_hist, r_cont_hist, theta_full, ci_low_hist, ci_high_hist
