@@ -97,7 +97,7 @@ def test_identification(system, true_params, synthetic_data, system_config):
         c0_cost=c0_cost,
         use_jax=use_jax
     )
-    ms.add_batch(state_true_batch, meas_batch, t_meas)
+    ms.add_batch(meas_batch, t_meas)
 
     theta_init = system_config["theta_init"]
     theta_full = ms.make_full_theta(theta_init)

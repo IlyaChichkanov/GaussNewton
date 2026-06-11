@@ -1,8 +1,8 @@
 import numpy as np
-from scipy.integrate import solve_ivp
 from commom_utils.ode_system import ODESystem, SystemJacobian
 from scipy.sparse import lil_matrix, csr_matrix, vstack, hstack, eye as speye, diags
 from scipy.sparse.linalg import spsolve
+from scipy.sparse import diags as spdiags
 from scipy import stats  
 
 class TimeIntervalManager:
@@ -27,9 +27,6 @@ class TimeIntervalManager:
 
 
 class MultipleShooting:
-    """
-    Multiple shooting implementation for parameter identification.
-    """
 
     def __init__(self, system: ODESystem, N_shoot: int, gamma: np.ndarray = None,
                  c0_cost: float = 1, use_jax: bool = False):
@@ -41,43 +38,16 @@ class MultipleShooting:
 
         # Data storage
         self.state_measured_batches = []
-        self.state_full_batches = []
         self.t_eval_measurements_batches = []
         self.interval_managers = []
-    def add_batch(self, state_full, state_measured, t_eval_measurements):
-        """Add a new batch of experimental data."""
+
+    def add_batch(self, state_measured, t_eval_measurements):
         self.state_measured_batches.append(state_measured)
-        self.state_full_batches.append(state_full)
         self.t_eval_measurements_batches.append(t_eval_measurements)
         self.interval_managers.append(TimeIntervalManager(self.N_shoot, t_eval_measurements))
 
-    def make_full_theta_from_true(self, theta0):
-        """
-        Build the full parameter vector (theta + initial conditions for all shoots).
-        """
-        theta_full = np.copy(theta0)
-        for state_meas, state_full, t_meas in zip(
-                self.state_measured_batches, self.state_full_batches, self.t_eval_measurements_batches):
-            n_meas = len(t_meas)
-            meas_idx = np.arange(n_meas, dtype=int)
-            shoot_idx = meas_idx[0:-1:int(len(meas_idx) / self.N_shoot)]
-            shoot_idx = np.append(shoot_idx, meas_idx[-1])
-            for i in range(len(shoot_idx) - 1):
-                id_ = shoot_idx[i]
-                c0_ = state_full[id_] #TODO  # initial guess from the provided full state  
-                theta_full = np.concatenate((theta_full, c0_))
-        return theta_full
 
-    def make_full_theta(self, theta0, c0_guess = np.nan, c0_init_method='inverse_h', n_iter=1):
-        """
-        Build the full parameter vector (theta + initial conditions for all shoots).
-        Initial guesses for c0 are computed from measurements using the system's inverse_h method.
-        
-        Parameters:
-            theta0: initial parameters (theta_len,)
-            c0_init_method: 'zeros', 'inverse_h' (default), or 'measurement_pad'
-            n_iter: number of iterations for inverse_h (if used)
-        """
+    def make_full_theta(self, theta0, c0_guess = None, c0_init_method='inverse_h', n_iter=1):
         theta_full = np.copy(theta0)
         n_state = self.system.nx
         
@@ -95,7 +65,6 @@ class MultipleShooting:
                 if c0_init_method == 'zeros':
                     c0_ = np.zeros(n_state)
                 elif c0_init_method == 'measurement_pad':
-                    # Прямое копирование (игнорируя нелинейность)
                     c0_ = np.zeros(n_state)
                     c0_[:len(y_first)] = y_first
                 elif c0_init_method == 'inverse_h':
@@ -109,9 +78,7 @@ class MultipleShooting:
         return theta_full
 
     def _concatenate_jacobians(self, J1, J2):
-        """Склеивает две разреженные матрицы (csr) разных батчей."""
         n_state, n_theta, _ = self.system.get_dimentions()
-        # Число параметров в каждом батче может отличаться (разное n_shoot)
         n_c1 = J1.shape[1] - n_theta
         n_c2 = J2.shape[1] - n_theta
 
@@ -128,10 +95,7 @@ class MultipleShooting:
         return vstack([top, bottom])
 
     def solve(self, theta_full):
-        """
-        Assemble the full Jacobians and residuals for all batches.
-        Returns (J_meas, R_meas, J_cont, R_cont).
-        """
+
         J_total = None
         J_G_total = None
         R_total = None
@@ -155,13 +119,16 @@ class MultipleShooting:
         
     def _solve_batch(self, theta_full, state_measured, t_meas, batch_idx):
         n_state, n_theta, n_meas = self.system.get_dimentions()
+        if self.gamma is not None and len(self.gamma) != n_meas:
+            raise ValueError(f"gamma length must be {n_meas}, got {len(self.gamma)}")
         idx_theta = slice(0, n_state * n_theta)
         idx_c = slice(n_state * n_theta, n_state * (n_theta + n_state))
         tm = self.interval_managers[batch_idx]
         n_shoot = tm.N_shoot
 
-        # Вычисляем общее число строк в J (измерения) и J_G (ограничения)
-        total_meas_points = sum(len(tm.get_time_interval(sh)[1]) for sh in range(n_shoot))
+
+        intervals = [tm.get_time_interval(sh) for sh in range(n_shoot)]
+        total_meas_points = sum(len(meas_idx) for _, meas_idx in intervals)
         n_params = n_theta + n_shoot * n_state
 
         J = lil_matrix((total_meas_points * n_meas, n_params))
@@ -169,17 +136,16 @@ class MultipleShooting:
         J_G = lil_matrix(((n_shoot - 1) * n_state, n_params))
         R_G = np.zeros((n_shoot - 1) * n_state)
 
-        meas_row = 0   # индекс в плоском R и строках J
+        meas_row = 0  
         cont_row = 0
         Jx_prev = None
         Jc_prev = None
         state_prev = None
 
-        for shoot in range(n_shoot):
+        for shoot, (t_interval, meas_idx) in enumerate(intervals):
             start_idx = n_theta + n_shoot * batch_idx * n_state + shoot * n_state
             c0 = theta_full[start_idx: start_idx + n_state]
 
-            t_interval, meas_idx = tm.get_time_interval(shoot)
             if self.use_jax:
                 sol = self.system.get_jacobian_solution_jax(c0, theta_full[:n_theta], t_interval)
             else:
@@ -217,7 +183,7 @@ class MultipleShooting:
 
                 if self.gamma is not None:
                     R[row_start:row_end] *= self.gamma
-                    J[row_start:row_end, :] = J[row_start:row_end, :].multiply(self.gamma[:, np.newaxis])
+                    J[row_start:row_end, :] = spdiags(self.gamma, 0, shape=(n_meas, n_meas)) @ J[row_start:row_end, :]
                     if i == 0:   # первая точка интервала
                         R[row_start:row_end] *= self.c0_cost
                         J[row_start:row_end, :] *= self.c0_cost
@@ -270,7 +236,6 @@ def compute_parameter_covariance(J, R, J_G, R_G, theta_full):
     return cov, sigma2
 
 def confidence_intervals(theta_opt, cov, dof, alpha=0.05):
-    """Возвращает (нижние_границы, верхние_границы) для каждого параметра."""
     se = np.sqrt(np.diag(cov))
     t_crit = stats.t.ppf(1 - alpha/2, df=dof)
     ci_low = theta_opt - t_crit * se
@@ -306,7 +271,7 @@ def run_optimization(problem, config, theta_full, system):
     r_cont_hist = []
     ci_low_hist = []
     ci_high_hist = []
-
+    consecutive_failures = 0
     mu = config.mu
     n_theta = system.np
 
@@ -335,14 +300,12 @@ def run_optimization(problem, config, theta_full, system):
         ci_low_hist.append(ci_low_full[:n_theta])
         ci_high_hist.append(ci_high_full[:n_theta])
 
-        # Вычисляем предлагаемый шаг (пока без изменения mu)
         delta_theta, new_mu = compute_delta_gn(
             J, R, J_G, R_G, mu,
             config.lambda_, config.lambda_reg,
             theta_full, it
         )
 
-        # Пробный вектор параметров
         theta_trial = theta_full + delta_theta
 
         # Проверяем на NaN в параметрах
@@ -350,7 +313,7 @@ def run_optimization(problem, config, theta_full, system):
             print("NaN в параметрах, остановка.")
             break
 
-        # Оцениваем стоимость для пробного шага
+
         J_trial, R_trial, J_G_trial, R_G_trial = problem.solve(theta_trial)
         trial_cost = np.sum(R_trial**2) + np.sum(R_G_trial**2)
 
@@ -361,11 +324,16 @@ def run_optimization(problem, config, theta_full, system):
             best_cost = trial_cost
             J, R, J_G, R_G = J_trial, R_trial, J_G_trial, R_G_trial
             mu = max(new_mu, mu_min)   # не даём mu упасть слишком низко
+            consecutive_failures = 0
         else:
             # Шаг плохой: откатываем, mu оставляем прежним
             print(f"  Шаг отклонён (cost {trial_cost:.3e} > {best_cost:.3e}), mu сохранён {mu:.2e}")
             # mu не меняется, оставляем старые J, R и theta_full
-
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                mu = max(mu / 2, mu_min)
+                print(f"  Принудительно уменьшаем mu до {mu:.2e} из-за {consecutive_failures} неудач")
+                consecutive_failures = 0
         # Сохраняем историю (текущие theta_full и невязки)
         theta_hist.append(theta_full.copy())
         r_meas_hist.append(meas_cost)
