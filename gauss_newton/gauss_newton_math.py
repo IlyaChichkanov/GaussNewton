@@ -1,6 +1,9 @@
 import numpy as np
 from scipy.integrate import solve_ivp
 from commom_utils.ode_system import ODESystem, SystemJacobian
+from scipy.sparse import lil_matrix, csr_matrix, vstack, hstack, eye as speye, diags
+from scipy.sparse.linalg import spsolve
+from scipy import stats  
 
 class TimeIntervalManager:
     def __init__(self, N_shoot, t_eval_measurements):
@@ -28,7 +31,7 @@ class MultipleShooting:
     Multiple shooting implementation for parameter identification.
     """
 
-    def __init__(self, system: ODESystem, N_shoot: int, gamma: np.ndarray = np.nan,
+    def __init__(self, system: ODESystem, N_shoot: int, gamma: np.ndarray = None,
                  c0_cost: float = 1, use_jax: bool = False):
         self.system = SystemJacobian(system)
         self.N_shoot = N_shoot
@@ -47,11 +50,6 @@ class MultipleShooting:
         self.state_full_batches.append(state_full)
         self.t_eval_measurements_batches.append(t_eval_measurements)
         self.interval_managers.append(TimeIntervalManager(self.N_shoot, t_eval_measurements))
-
-    def get_time_interval(self, shoot, batch):
-        """Get time interval and measurement indices for a given shoot and batch."""
-        tm = self.interval_managers[batch]
-        return tm.get_time_interval(shoot)
 
     def make_full_theta_from_true(self, theta0):
         """
@@ -101,10 +99,7 @@ class MultipleShooting:
                     c0_ = np.zeros(n_state)
                     c0_[:len(y_first)] = y_first
                 elif c0_init_method == 'inverse_h':
-                    if c0_guess is None or np.any(np.isnan(c0_guess)):
-                        x0_guess = np.zeros(n_state)
-                    else:
-                        x0_guess = np.copy(c0_guess)
+                    x0_guess = np.zeros(n_state) if c0_guess is None or np.any(np.isnan(c0_guess)) else c0_guess
                     c0_ = self.system.inverse_h(y_first, t_first, theta0, 
                                                 x_guess=x0_guess, n_iter=n_iter)
                 else:
@@ -114,15 +109,23 @@ class MultipleShooting:
         return theta_full
 
     def _concatenate_jacobians(self, J1, J2):
-        """
-        Concatenate two jacobian matrices in the block structure required by multiple shooting.
-        """
+        """Склеивает две разреженные матрицы (csr) разных батчей."""
         n_state, n_theta, _ = self.system.get_dimentions()
+        # Число параметров в каждом батче может отличаться (разное n_shoot)
+        n_c1 = J1.shape[1] - n_theta
+        n_c2 = J2.shape[1] - n_theta
+
+        J1_theta = J1[:, :n_theta]
+        J1_c0 = J1[:, n_theta:]
         J2_theta = J2[:, :n_theta]
         J2_c0 = J2[:, n_theta:]
-        zeros1 = np.zeros((J1.shape[0], J2_c0.shape[1]))
-        zeros2 = np.zeros((J2_theta.shape[0], J1.shape[1] - n_theta))
-        return np.block([[J1, zeros1], [J2_theta, zeros2, J2_c0]])
+
+        zeros_top = csr_matrix((J1.shape[0], n_c2))
+        zeros_bottom = csr_matrix((J2.shape[0], n_c1))
+
+        top = hstack([J1_theta, J1_c0, zeros_top])
+        bottom = hstack([J2_theta, zeros_bottom, J2_c0])
+        return vstack([top, bottom])
 
     def solve(self, theta_full):
         """
@@ -149,39 +152,30 @@ class MultipleShooting:
                 R_G_total = np.hstack((R_G_total, R_G_batch))
 
         return J_total, R_total, J_G_total, R_G_total
-
+        
     def _solve_batch(self, theta_full, state_measured, t_meas, batch_idx):
-        """
-        Process one experimental batch.
-        Returns (J_meas, J_cont, R_meas, R_cont) for this batch.
-        """
         n_state, n_theta, n_meas = self.system.get_dimentions()
-
-        # Indices within the sensitivity solution
         idx_theta = slice(0, n_state * n_theta)
         idx_c = slice(n_state * n_theta, n_state * (n_theta + n_state))
-
         tm = self.interval_managers[batch_idx]
         n_shoot = tm.N_shoot
 
-        # Preallocate arrays
+        # Вычисляем общее число строк в J (измерения) и J_G (ограничения)
         total_meas_points = sum(len(tm.get_time_interval(sh)[1]) for sh in range(n_shoot))
-        J = np.zeros((total_meas_points, n_meas, n_theta + n_shoot * n_state))
-        R = np.zeros((total_meas_points, n_meas))
+        n_params = n_theta + n_shoot * n_state
 
-        J = np.zeros((total_meas_points, n_meas, n_theta + n_shoot * n_state))
-        J_G = np.zeros((n_shoot - 1, n_state, n_theta + n_shoot * n_state))
-        R = np.zeros((total_meas_points, n_meas))
-        R_G = np.zeros((n_shoot - 1, n_state))
+        J = lil_matrix((total_meas_points * n_meas, n_params))
+        R = np.zeros(total_meas_points * n_meas)
+        J_G = lil_matrix(((n_shoot - 1) * n_state, n_params))
+        R_G = np.zeros((n_shoot - 1) * n_state)
 
-        meas_row = 0          # current row index for measurements
-        cont_row = 0          # current row index for continuity constraints
+        meas_row = 0   # индекс в плоском R и строках J
+        cont_row = 0
         Jx_prev = None
         Jc_prev = None
         state_prev = None
 
         for shoot in range(n_shoot):
-            # Extract initial condition for this shoot
             start_idx = n_theta + n_shoot * batch_idx * n_state + shoot * n_state
             c0 = theta_full[start_idx: start_idx + n_state]
 
@@ -191,11 +185,10 @@ class MultipleShooting:
             else:
                 sol = self.system.get_jacobian_solution(c0, theta_full[:n_theta], t_interval)
 
-            # Extract state and sensitivity parts
-            state_traj = sol[:n_state, :]          # (n_state, n_time)
-            J_raw = sol[n_state:, :]               # (n_state*(n_theta+n_state), n_time)
+            state_traj = sol[:n_state, :]
+            J_raw = sol[n_state:, :]
 
-            # Process each measurement point in this interval
+            # Обработка измерений интервала (цикл, как и раньше)
             for i, idx in enumerate(meas_idx):
                 state = state_traj[:, i]
                 t = t_interval[i]
@@ -206,108 +199,103 @@ class MultipleShooting:
                 dx_dtheta = J_raw[idx_theta, i].reshape(n_state, n_theta)
                 dx_dc = J_raw[idx_c, i].reshape(n_state, n_state)
 
-                J_theta = dh_dx @ dx_dtheta + dh_dtheta
-                J_c = dh_dx @ dx_dc
+                J_theta = dh_dx @ dx_dtheta + dh_dtheta   # (n_meas, n_theta)
+                J_c = dh_dx @ dx_dc                       # (n_meas, n_state)
 
-                # Normalize by number of points in this interval
-                J[meas_row, :, :n_theta] = J_theta 
-                J[meas_row, :, n_theta + shoot * n_state : n_theta + (shoot + 1) * n_state] = J_c 
+                # Строки, соответствующие этому измерению
+                row_start = meas_row * n_meas
+                row_end = row_start + n_meas
+
+                # Заполняем блоки в разреженной матрице
+                J[row_start:row_end, :n_theta] = J_theta
+                col_start = n_theta + shoot * n_state
+                J[row_start:row_end, col_start:col_start + n_state] = J_c
+
                 y_meas = state_measured[idx]
                 y_pred = self.system.h_x(state, t, theta_full[:n_theta])
-                R[meas_row] = (y_meas - y_pred) 
+                R[row_start:row_end] = (y_meas - y_pred)
 
-                # Apply weights if gamma is provided
                 if self.gamma is not None:
-                    R[meas_row] *= self.gamma
-                    J[meas_row] *= self.gamma[:, np.newaxis]
-                    if i == 0:   # first point in interval gets extra weight
-                        R[meas_row] *= self.c0_cost
-                        J[meas_row] *= self.c0_cost
+                    R[row_start:row_end] *= self.gamma
+                    J[row_start:row_end, :] = J[row_start:row_end, :].multiply(self.gamma[:, np.newaxis])
+                    if i == 0:   # первая точка интервала
+                        R[row_start:row_end] *= self.c0_cost
+                        J[row_start:row_end, :] *= self.c0_cost
 
                 meas_row += 1
 
-            # Continuity constraints (skip for first shoot)
+            # Ограничения непрерывности
             if shoot > 0:
-                J_G[cont_row, :, :n_theta] = Jx_prev
-                J_G[cont_row, :, n_theta + (shoot - 1) * n_state : n_theta + shoot * n_state] = Jc_prev
-                J_G[cont_row, :, n_theta + shoot * n_state : n_theta + (shoot + 1) * n_state] = -np.eye(n_state)
-                R_G[cont_row] = -(state_prev - c0)
+                row_idx = cont_row * n_state
+                J_G[row_idx:row_idx + n_state, :n_theta] = Jx_prev
+                col_prev = n_theta + (shoot - 1) * n_state
+                J_G[row_idx:row_idx + n_state, col_prev:col_prev + n_state] = Jc_prev
+                col_curr = n_theta + shoot * n_state
+                J_G[row_idx:row_idx + n_state, col_curr:col_curr + n_state] = -np.eye(n_state)
+                R_G[row_idx:row_idx + n_state] = -(state_prev - c0)
                 cont_row += 1
 
-            # Store data for next shoot
             Jx_prev = J_raw[idx_theta, -1].reshape(n_state, n_theta)
             Jc_prev = J_raw[idx_c, -1].reshape(n_state, n_state)
             state_prev = state_traj[:, -1]
 
-        # Flatten the arrays
-        J_flat = J.reshape(total_meas_points * n_meas, -1)
-        R_flat = R.reshape(total_meas_points * n_meas)
-        J_G_flat = np.array([])
-        R_G_flat = np.array([])
-        if shoot > 0:
-            J_G_flat = J_G.reshape((n_shoot - 1) * n_state, -1)
-            R_G_flat = R_G.reshape((n_shoot - 1) * n_state)
-
-        return J_flat, J_G_flat, R_flat, R_G_flat
-
+        # Преобразуем в CSR для быстрых операций
+        J = J.tocsr()
+        J_G = J_G.tocsr()
+        return J, J_G, R, R_G
 
 
 def compute_parameter_covariance(J, R, J_G, R_G, theta_full):
-    J_full = J
-    R_full = R
-    if len(J_G) > 0:
-        J_full = np.vstack([J, J_G])
-        R_full = np.hstack([R, R_G])
-    residual_sum_squares = R_full @ R_full
+    # J, J_G – csr_matrix
+    if J_G.shape[0] > 0:
+        J_full = vstack([J, J_G])
+        R_full = np.concatenate([R, R_G])
+    else:
+        J_full = J
+        R_full = R
+
+    residual_sum_squares = np.dot(R_full, R_full)
     n_meas = J.shape[0]
-    n_cont = J_G.shape[0]
+    n_cont = J_G.shape[0]   # теперь это 0, если ограничений нет
     n_params = len(theta_full)
-    dof = n_meas + n_cont - n_params
-    # Защита: если степеней свободы меньше 1, используем 1, чтобы избежать деления на 0
-    dof = max(dof, 1)
+    dof = max(n_meas + n_cont - n_params, 1)
     sigma2 = residual_sum_squares / dof
-    H = J_full.T @ J_full
-    H_reg = H + 1e-8 * np.eye(n_params)
+
+    H = J_full.T @ J_full   # csr_matrix
+    H_reg = H + 1e-8 * speye(n_params)
     try:
-        cov = sigma2 * np.linalg.inv(H_reg)
+        cov = sigma2 * np.linalg.inv(H_reg.toarray())
     except np.linalg.LinAlgError:
-        cov = sigma2 * np.linalg.pinv(H_reg)
+        cov = sigma2 * np.linalg.pinv(H_reg.toarray())
     return cov, sigma2
 
 def confidence_intervals(theta_opt, cov, dof, alpha=0.05):
     """Возвращает (нижние_границы, верхние_границы) для каждого параметра."""
-    from scipy import stats   # <-- добавил для t-критерия
     se = np.sqrt(np.diag(cov))
     t_crit = stats.t.ppf(1 - alpha/2, df=dof)
     ci_low = theta_opt - t_crit * se
     ci_high = theta_opt + t_crit * se
     return ci_low, ci_high
 
-# ---------- Вычисление шага (ваш работающий метод) ----------
 def compute_delta_gn(J, R, J_G, R_G, mu, lambda_, lambda_reg, theta_full, iter_num):
-    J_full = J
-    R_full = R
-    multiple_shooting = len(J_G) > 0
-
+    multiple_shooting = J_G.shape[0] > 0
+    n_params = len(theta_full)
     if multiple_shooting:
-        H = J.T @ J
-        H_full = np.block([[H, J_G.T],
-                           [J_G, -mu * np.eye(J_G.shape[0])]])
-        R_full = np.concatenate((J.T @ R, R_G))
-        k = J.shape[1]
-        I_reg = np.zeros(H_full.shape)
-        I_reg[:k, :k] = np.eye(k)
-        H_reg = H_full + lambda_reg * I_reg + lambda_ * np.diag(np.diag(H_full))
-        delta = np.linalg.solve(H_reg, R_full)
-        delta_theta = delta[:len(theta_full)]
+        H = J.T @ J   # csr
+        reg_theta = lambda_reg * speye(n_params) + lambda_ * diags(H.diagonal())
+        top = hstack([H + reg_theta, J_G.T])
+        n_cont = J_G.shape[0]
+        bottom = hstack([J_G, -mu * speye(n_cont)])
+        H_full = vstack([top, bottom])
+        rhs = np.concatenate([J.T @ R, R_G])
+        delta = spsolve(H_full, rhs)
+        delta_theta = delta[:n_params]
         new_mu = mu / 2
     else:
-        J_full = J
-        R_full = R
-        H_full = J_full.T @ J_full
-        H_reg = H_full + 1e-8 * np.eye(H_full.shape[0])
-        delta_full = np.linalg.solve(H_reg, J_full.T @ R_full)
-        delta_theta = delta_full[:len(theta_full)]
+        H = J.T @ J
+        H_reg = H + 1e-8 * speye(n_params)
+        rhs = J.T @ R
+        delta_theta = spsolve(H_reg, rhs)
         new_mu = mu
     return delta_theta, new_mu
 
@@ -328,7 +316,7 @@ def run_optimization(problem, config, theta_full, system):
     # Начальные невязки для сравнения
     J, R, J_G, R_G = problem.solve(theta_full)
     best_cost = np.sum(R**2) + np.sum(R_G**2)  # полная стоимость
-
+    print(f'  J nnz: {J.nnz}, J_G nnz: {J_G.nnz}')
     for it in range(config.n_iter):
         start = time.time()
 

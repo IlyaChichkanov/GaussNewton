@@ -31,12 +31,10 @@ SYSTEMS_CONFIG = {
         "time_interval": (0.0, 5.0),
         "n_measurements": 100,
         "sigma": 0.05,
-        "N_shoot": 10,
-        "mu": 20.0, 
+        "N_shoot": 20,
+        "mu": 100.0, 
         "theta_init": np.array([0.0, 0.0, 0.0]),
     }
-    # Можно добавить другие системы:
-    # "AnotherSystem": {...}
 }
 
 def pytest_generate_tests(metafunc):
@@ -68,7 +66,6 @@ def time_interval(system_config):
 
 @pytest.fixture
 def synthetic_data(system, true_params, initial_state, time_interval, system_config):
-    """Генерирует синтетические данные с шумом."""
     gen = SyntheticDataGenerator(
         system,
         sigma=system_config.get("noise_sigma", 0.01),
@@ -85,19 +82,14 @@ def synthetic_data(system, true_params, initial_state, time_interval, system_con
     return t_batches[0], meas_batches[0], state_batches[0]
 
 def test_identification(system, true_params, synthetic_data, system_config):
-    """
-    Основной тест: выполняет идентификацию параметров для любой системы,
-    заданной в SYSTEMS_CONFIG.
-    """
+
     t_meas, meas_batch, state_true_batch = synthetic_data
 
-    # Параметры конфигурации
     N_shoot = system_config["N_shoot"]
     gamma = np.ones(system.n_obs)  # веса измерений
     c0_cost = 1.0
     use_jax = False
 
-    # Создаём SystemJacobian и MultipleShooting
     ms = MultipleShooting(
         system=system,
         N_shoot=N_shoot,
@@ -107,18 +99,17 @@ def test_identification(system, true_params, synthetic_data, system_config):
     )
     ms.add_batch(state_true_batch, meas_batch, t_meas)
 
-    # Начальное приближение параметров
     theta_init = system_config["theta_init"]
     theta_full = ms.make_full_theta(theta_init)
 
-    # Конфигурация оптимизации
+
     config = types.SimpleNamespace()
     config.mu = system_config["mu"]
     config.n_iter = 20
     config.lambda_ = 0.001
     config.lambda_reg = 0.0
+    config.mu_min = 1e-6
 
-    # Запуск оптимизации
     theta_hist, r_meas_hist, r_cont_hist, theta_full_opt, ci_low_hist, ci_high_hist = run_optimization(
         problem=ms,
         config=config,
