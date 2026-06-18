@@ -58,16 +58,6 @@ SYSTEM_CONFIGS = {
         "observation": lambda state, theta, u: state[:3],
         "get_initial_state": lambda y_meas, u, theta: y_meas,
     },
-    "Delay": {                                         # соответствует GN‑модели "Delay"
-        "class": DelaySystem,
-        "args": [2],
-        "c0": np.array([0.0, 0.0]),
-        "theta_true": np.array([0.4]),
-        "delta_theta": np.array([0.2]),
-        "input_signal": lambda t: [jnp.sin(t)],         # одномерный вход
-        "observation": lambda state, theta, u: state,  # по умолчанию весь state
-        "get_initial_state": lambda y_meas, u, theta: y_meas,
-    },
 
     # ------------------------------------------------------------------
     # Модели, использовавшиеся только в MHE (configs), дополненные
@@ -83,8 +73,8 @@ SYSTEM_CONFIGS = {
         "get_initial_state": lambda y_meas, u, theta: y_meas,
     },
     "KinematicBycicle": {
-        "class": KinematicBycicle,                     # модель из MHE (возможно, упрощённая)
-        "args": [2.65],                                # wheelbase
+        "class": KinematicModel,                     # модель из MHE (возможно, упрощённая)
+        "args": [2.65, True],                                # wheelbase
         "c0": np.array([0.0]),                         # одномерное состояние? Уточните
         "theta_true": np.array([0.05, np.deg2rad(-1.0)]),
         "delta_theta": np.array([0.01, np.deg2rad(2.0)]),
@@ -106,7 +96,7 @@ SYSTEM_CONFIGS = {
         "args": [],
         "c0": np.array([0.0, 0.0]),
         "theta_true": np.array([1.0]),
-        "delta_theta": None,
+        "delta_theta": np.array([0.1]),
         "input_signal": None,
         "observation": lambda state, theta, u: state,
         "get_initial_state": lambda y_meas, u, theta: y_meas,
@@ -116,7 +106,7 @@ SYSTEM_CONFIGS = {
         "args": [2],
         "c0": np.array([0.0, 0.0]),
         "theta_true": np.array([0.4]),
-        "delta_theta": None,
+        "delta_theta": np.array([0.2]),
         "input_signal": harmonic,
         "observation": None,
         "get_initial_state": lambda y_meas, u, theta: np.hstack((u, 0)),
@@ -237,7 +227,7 @@ def create_system(cfg: dict):
         ConfiguredSystem.get_initial_state = lambda self, y_meas, u, theta: y_meas
 
     system = ConfiguredSystem(*cfg["args"])
-    return system, cfg["c0"].copy(), cfg["theta_true"].copy(), cfg.get("delta_theta")
+    return system, cfg["c0"].copy(), cfg["theta_true"].copy(), cfg["delta_theta"].copy()  
 
 
 from mhe.params import MheParams

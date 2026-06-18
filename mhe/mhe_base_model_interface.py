@@ -12,6 +12,7 @@ from mhe.params import MheParams
 from commom_utils.ocp_utils import generate_header, is_discrete
 from commom_utils.ode_system import ODESystem
 
+
 class MheModel(ABC):
     def __init__(self, system: ODESystem):
         self.system = system
@@ -238,12 +239,10 @@ class MheModel(ABC):
             if R_inv.shape != (nx, nx):
                 raise ValueError(f"R_inv must be {nx}x{nx}")
 
-        # Символьные переменные
         theta_sym = ca.SX.sym('theta', n_theta)
         x_sym = ca.SX.sym('x', nx)          # начальное состояние фиксировано (initial_x0)
         u_sym = ca.SX.sym('u', N, simU.shape[1])
 
-        # Функция одного шага RK4
         def step(x, theta, u):
             k1 = self.main_dynamics(x, theta, u)
             k2 = self.main_dynamics(x + 0.5*dt*k1, theta, u)
@@ -251,7 +250,6 @@ class MheModel(ABC):
             k4 = self.main_dynamics(x + dt*k3, theta, u)
             return x + (dt/6.0)*(k1 + 2*k2 + 2*k3 + k4)
 
-        # Симуляция траектории выхода (все состояния)
         y_sim = []
         
         x = initial_x0
@@ -261,28 +259,19 @@ class MheModel(ABC):
             y_sim.append(x)
         y_all = ca.vertcat(*y_sim)   # (N+1)*nx x 1
 
-        # Измерения (константы)
         Y_meas = ca.DM(simY.reshape(-1, 1))
 
-        # Невязка и взвешенная сумма квадратов
         residuals = y_all - Y_meas
         W_blocks = [ca.DM(R_inv) for _ in range(N)]
         W = ca.diagcat(*W_blocks)
         J_meas = ca.mtimes([residuals.T, W, residuals])
 
-        # Гессиан J_meas по параметрам
         H = ca.hessian(J_meas, theta_sym)[0]   # матрица 2-х производных
 
-        # Вычисление в точке оценки
         func_H = ca.Function('H', [theta_sym, u_sym], [H])
         H_num = func_H(theta_est, simU)
 
-        # Наблюдаемая FIM = 0.5 * H (поскольку в MHE cost = J_meas, а логарифм правдоподобия = -0.5 * J_meas)
         F_obs = 0.5 * np.array(H_num)
-
-        # Добавляем априорный вклад (если есть)
-        # Здесь нужно добавить P0, если он использовался в MHE
-        # F_obs += P0
         return F_obs
 
 class MheCogeGenerator(ABC):

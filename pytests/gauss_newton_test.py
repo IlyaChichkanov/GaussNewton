@@ -108,6 +108,7 @@ def test_identification(system, true_params, synthetic_data, system_config):
     config.n_iter = 20
     config.lambda_ = 0.001
     config.lambda_reg = 0.0
+    config.mu_dec = 0.7
     config.mu_min = 1e-6
 
     theta_hist, r_meas_hist, r_cont_hist, theta_full_opt, ci_low_hist, ci_high_hist = run_optimization(

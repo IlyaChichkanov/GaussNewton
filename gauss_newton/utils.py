@@ -410,11 +410,11 @@ def plot_solution(
             traj = get_traj(c0, t_dense)   # (500, n_state)
 
             # Рисуем траекторию на верхней панели
+            meas_traj = []
+            for t_, state in zip(t_dense, traj):
+                meas_traj.append(problem.system.h_x(state, t_, theta))
+            meas_traj = np.array(meas_traj)
             if is_single:
-                meas_traj = []
-                for t_, state in zip(t_dense, traj):
-                    meas_traj.append(problem.system.h_x(state, t_, theta))
-                meas_traj = np.array(meas_traj)
                 ax_state0.plot(t_dense, meas_traj, 'b-', alpha=0.7)
             else:
                 _plot_traj(ax_traj, traj, use_3d, color='blue', alpha=0.7)
@@ -422,7 +422,7 @@ def plot_solution(
             # Временные ряды для plot_xy (n_state>1)
             if plot_xy and not is_single:
                 for state_idx in range(n_obs):
-                    axes_states[state_idx][batch].plot(t_dense, traj[:, state_idx],
+                    axes_states[state_idx][batch].plot(t_dense, meas_traj[:, state_idx],
                                                        'b-', alpha=0.7)
 
         # ---- Измерения ----

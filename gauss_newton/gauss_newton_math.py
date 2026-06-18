@@ -115,6 +115,7 @@ class MultipleShooting:
                 R_total = np.hstack((R_total, R_batch))
                 R_G_total = np.hstack((R_G_total, R_G_batch))
 
+        print(f'J_G_total shape: {J_G_total.shape}, R_G_total len: {len(R_G_total)}')
         return J_total, R_total, J_G_total, R_G_total
         
     def _solve_batch(self, theta_full, state_measured, t_meas, batch_idx):
@@ -211,29 +212,22 @@ class MultipleShooting:
         return J, J_G, R, R_G
 
 
-def compute_parameter_covariance(J, R, J_G, R_G, theta_full):
-    # J, J_G – csr_matrix
-    if J_G.shape[0] > 0:
-        J_full = vstack([J, J_G])
-        R_full = np.concatenate([R, R_G])
-    else:
-        J_full = J
-        R_full = R
-
-    residual_sum_squares = np.dot(R_full, R_full)
+def compute_parameter_covariance_measurements_only(J, R, n_theta):
+    # J – полный якобиан измерений (n_meas × n_params_full)
+    # Берём только первые n_theta столбцов (θ)
+    J_theta = J[:, :n_theta]
     n_meas = J.shape[0]
-    n_cont = J_G.shape[0]   # теперь это 0, если ограничений нет
-    n_params = len(theta_full)
-    dof = max(n_meas + n_cont - n_params, 1)
+    # Оценка дисперсии шума по измерительным невязкам
+    residual_sum_squares = np.dot(R, R)
+    dof = max(n_meas - n_theta, 1)
     sigma2 = residual_sum_squares / dof
-
-    H = J_full.T @ J_full   # csr_matrix
-    H_reg = H + 1e-8 * speye(n_params)
+    H = J_theta.T @ J_theta
+    H_reg = H + 1e-8 * np.eye(n_theta)
     try:
-        cov = sigma2 * np.linalg.inv(H_reg.toarray())
+        cov_theta = sigma2 * np.linalg.inv(H_reg.toarray() if hasattr(H_reg, 'toarray') else H_reg)
     except np.linalg.LinAlgError:
-        cov = sigma2 * np.linalg.pinv(H_reg.toarray())
-    return cov, sigma2
+        cov_theta = sigma2 * np.linalg.pinv(H_reg.toarray() if hasattr(H_reg, 'toarray') else H_reg)
+    return cov_theta, sigma2
 
 def confidence_intervals(theta_opt, cov, dof, alpha=0.05):
     se = np.sqrt(np.diag(cov))
@@ -242,7 +236,7 @@ def confidence_intervals(theta_opt, cov, dof, alpha=0.05):
     ci_high = theta_opt + t_crit * se
     return ci_low, ci_high
 
-def compute_delta_gn(J, R, J_G, R_G, mu, lambda_, lambda_reg, theta_full, iter_num):
+def compute_delta_gn(J, R, J_G, R_G, mu, lambda_, lambda_reg, theta_full, iter_num, mu_dec):
     multiple_shooting = J_G.shape[0] > 0
     n_params = len(theta_full)
     if multiple_shooting:
@@ -251,14 +245,14 @@ def compute_delta_gn(J, R, J_G, R_G, mu, lambda_, lambda_reg, theta_full, iter_n
         top = hstack([H + reg_theta, J_G.T])
         n_cont = J_G.shape[0]
         bottom = hstack([J_G, -mu * speye(n_cont)])
-        H_full = vstack([top, bottom])
+        H_full = vstack([top, bottom]).tocsr()     # ← преобразовать в CSR
         rhs = np.concatenate([J.T @ R, R_G])
         delta = spsolve(H_full, rhs)
         delta_theta = delta[:n_params]
-        new_mu = mu / 2
+        new_mu = mu * mu_dec
     else:
         H = J.T @ J
-        H_reg = H + 1e-8 * speye(n_params)
+        H_reg = (H + 1e-8 * speye(n_params)).tocsr()   # ← преобразовать в CSR
         rhs = J.T @ R
         delta_theta = spsolve(H_reg, rhs)
         new_mu = mu
@@ -292,18 +286,16 @@ def run_optimization(problem, config, theta_full, system):
               f'R_meas: {meas_cost:.3e} | R_cont: {cont_cost:.3e} | mu: {mu:.2e}')
 
         # Ковариация и доверительные интервалы (на текущих J, R)
-        cov_full, _ = compute_parameter_covariance(J, R, J_G, R_G, theta_full)
-        n_meas = J.shape[0]
-        n_cont = J_G.shape[0]
-        dof = max(1, n_meas + n_cont - len(theta_full))
-        ci_low_full, ci_high_full = confidence_intervals(theta_full, cov_full, dof, alpha=0.05)
-        ci_low_hist.append(ci_low_full[:n_theta])
-        ci_high_hist.append(ci_high_full[:n_theta])
+        cov_theta, _ = compute_parameter_covariance_measurements_only(J, R, n_theta)
+        dof_meas = max(1, J.shape[0] - n_theta)
+        ci_low_theta, ci_high_theta = confidence_intervals(theta_full[:n_theta], cov_theta, dof_meas, alpha=0.05)
+        ci_low_hist.append(ci_low_theta)
+        ci_high_hist.append(ci_high_theta)
 
         delta_theta, new_mu = compute_delta_gn(
             J, R, J_G, R_G, mu,
             config.lambda_, config.lambda_reg,
-            theta_full, it
+            theta_full, it, config.mu_dec
         )
 
         theta_trial = theta_full + delta_theta
@@ -318,7 +310,7 @@ def run_optimization(problem, config, theta_full, system):
         trial_cost = np.sum(R_trial**2) + np.sum(R_G_trial**2)
 
         # Принимаем шаг только если стоимость уменьшилась (или не изменилась)
-        if not np.isnan(trial_cost) and trial_cost <= best_cost:
+        if not np.isnan(trial_cost) and trial_cost <= 20*best_cost:
             # Успех: применяем новые параметры и обновляем mu (но не ниже mu_min)
             theta_full = theta_trial
             best_cost = trial_cost
@@ -330,8 +322,10 @@ def run_optimization(problem, config, theta_full, system):
             print(f"  Шаг отклонён (cost {trial_cost:.3e} > {best_cost:.3e}), mu сохранён {mu:.2e}")
             # mu не меняется, оставляем старые J, R и theta_full
             consecutive_failures += 1
+            mu = max(mu /config.mu_dec, mu_min)
             if consecutive_failures >= 3:
-                mu = max(mu / 2, mu_min)
+                break
+                mu = max(mu *config.mu_dec, mu_min)
                 print(f"  Принудительно уменьшаем mu до {mu:.2e} из-за {consecutive_failures} неудач")
                 consecutive_failures = 0
         # Сохраняем историю (текущие theta_full и невязки)

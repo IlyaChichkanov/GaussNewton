@@ -217,30 +217,40 @@ class KinematicBycicleErrors(ODESystem):
         dpsi = vx * ca.tan(rwa) / self.wheelbase - vx * c * ca.cos(psi) / (1 - c * d)
         return ca.vertcat(dd, dpsi)
     
-class KinematicBycicle(ODESystem):
-    def __init__(self, wheelbase):
+class KinematicModel(ODESystem):
+    def __init__(self, wheelbase: float, use_offset: bool):
+        self.use_offset = use_offset
         self.wheelbase = wheelbase
-        super().__init__(nx=1, nu=2, np=2)
-        
+        np = 1
+        if (use_offset):
+            np += 1
+        super().__init__(nx=1, np=np, nu=2)
 
     def get_derivative(self, state, params, input_signals):
         psi = state[0]
         GR = params[0]
-        offset = params[1]
+        offset = 0
+        if (self.use_offset):
+            offset = params[1]
+
         vx = input_signals[0]
         steering = input_signals[1]
         rwa = GR * steering + offset
         dpsi = vx * ca.tan(rwa) / self.wheelbase
         return ca.vertcat(dpsi)
-    
+
     def observation(self, state, params, input_signals):
         GR = params[0]
-        offset = params[1]
+        offset = 0
+        if (self.use_offset):
+            offset = params[1]
+
         v = input_signals[0]
         steering = input_signals[1]
         rwa = GR * steering + offset
         w = v * ca.tan(rwa) / self.wheelbase
         return vertcat(state, w)
+
     
 class OffsetEstimator(ODESystem):
     def __init__(self, wheelbase, gear_ratio):
