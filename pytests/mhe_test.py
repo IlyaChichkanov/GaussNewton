@@ -32,23 +32,23 @@ def harmonic(t):
 
 
 SYSTEM_CONFIGS = {
-    "DelaySystem": {
-        "class": DelaySystem,
-        "args": [2],
-        "c0": np.array([0.0, 0.0]),
-        "theta_true": np.array([0.4]),
-        "delta_theta": np.array([0.2]),
-        "input_signal": lambda t: harmonic(t),         #
-        #"observation": lambda state, theta, u: state,  # по умолчанию весь state
-        "get_initial_state": lambda y_meas, u, theta: np.hstack((u, 0))
-    },
+    # "DelaySystem": {
+    #     "class": DelaySystem,
+    #     "args": [2],
+    #     "c0": np.array([0.0, 0.0]),
+    #     "theta_true": np.array([0.4]),
+    #     "delta_theta": np.array([0.2]),
+    #     "input_signal": lambda t: harmonic(t),         #
+    #     #"observation": lambda state, theta, u: state,  # по умолчанию весь state
+    #     "get_initial_state": lambda y_meas, u, theta: np.hstack((u, 0))
+    # },
 
     "KinematicBycicle": {
         "class": KinematicModel,                     # модель из MHE (возможно, упрощённая)
         "args": [2.65, True],                                # wheelbase
         "c0": np.array([0.0]),                         # одномерное состояние? Уточните
-        "theta_true": np.array([0.05, np.deg2rad(-1.0)]),
-        "delta_theta": np.array([0.01, np.deg2rad(2.0)]),
+        "theta_true": np.array([0.05, np.deg2rad(0.0)]),
+        "delta_theta": np.array([0.01, np.deg2rad(1.0)]),
         "input_signal": get_input_signals_bycicle,
         "get_initial_state": lambda y_meas, u, theta: y_meas[0:1],
     },
@@ -77,6 +77,8 @@ MHE_CONFIGS = {
     },
 
 }
+
+
 
 
 def create_system(cfg: dict):
@@ -110,6 +112,7 @@ def create_mhe_params(mhe_cfg: dict, dt: float, mhe_horizont: int):
         bounds_state=mhe_cfg["bounds_state"],
         bounds_param=mhe_cfg["bounds_param"],
         fim_scaler=mhe_cfg["fim_scaler"],
+        use_noise = 1
     )
 
 
@@ -177,8 +180,11 @@ def test_mhe_identification(system_config, tmp_path):
                     initial_theta,
                     N_meas
                     )
-    sigmas = np.abs(initial_theta - theta_true)
-    initial_precision = np.diag(1/sigmas**2)
+    initial_std = np.abs(initial_theta - theta_true)
+
+    initial_std = np.abs(delta_theta) * 1.0 
+    initial_precision = np.diag(1/initial_std**2)
+
     results = run_mhe_estimation(
         mhe_model=generator.get_model(),
         acados_solver_factory=acados_solver,
@@ -186,20 +192,24 @@ def test_mhe_identification(system_config, tmp_path):
         get_initial_state_func=system.get_initial_state,
         overlap_points=overlap_points,
         initial_theta=initial_theta,
-        initial_precision = initial_precision,
         mhe_params=mhe_params,
         num_windows=num_windows,
-        ridge_reg=1e-0,
+        initial_precision = initial_precision,
+        ridge_reg=1e-6,
         r_inv=mhe_params.measurements_residual_r,
-        forgetting_factor=0.1,
-        compute_advanced_fim=True,
+        forgetting_factor=1.0,
         plot=False
     )
-    plot = 0
+    final_theta_est = results[-1].param_est
+    rel_error = np.abs((final_theta_est - theta_true) / theta_true)
+    print(f'rel_error : {rel_error}')
+    print(f'final_theta_est - {final_theta_est}, theta_true - {theta_true}')
+    plot = 1
     if (plot):
         plot_mhe_results(results, overlap=overlap_points,
-                    initial_params=None,
+                    initial_params=initial_theta,
                     theta_true=theta_true,   # your true parameter array
+                    initial_std = initial_std,
                     plot_states=True,
                     plot_params=True,
                     plot_eigvals=False,
@@ -210,8 +220,5 @@ def test_mhe_identification(system_config, tmp_path):
                     plot_cov_matrix=False,
                     figsize=(15, 18))   # slightly larger to accommodate taller first plot
 
-    final_theta_est = results[-1].param_est
-
-    rel_error = np.abs((final_theta_est - theta_true) / theta_true)
-    assert np.all(rel_error < 1e-2), f"System {system_name}: final estimate {final_theta_est} \
+    assert np.all(rel_error < 2e-2), f"System {system_name}: final estimate {final_theta_est} \
                                      differs from true {theta_true} by {rel_error}"

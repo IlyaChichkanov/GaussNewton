@@ -244,4 +244,5 @@ def create_mhe_params(mhe_cfg: dict, dt: float, mhe_horizont: int):
         bounds_state=mhe_cfg["bounds_state"],
         bounds_param=mhe_cfg["bounds_param"],
         fim_scaler=mhe_cfg["fim_scaler"],
+        use_noise=0
     )

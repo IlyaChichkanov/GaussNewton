@@ -6,6 +6,7 @@ import numpy as np
 import scipy.linalg as la
 from acados_template import AcadosOcpSolver
 from mhe.mhe_base_model_interface import MheModel
+from matplotlib.widgets import RangeSlider
 from tqdm import tqdm
 
 # Configure logging
@@ -47,8 +48,7 @@ def reset_mhe_solver(mhe_model: MheModel,
         # Формируем расширенный вектор состояния + параметров
         x_aug = np.hstack((x_sim, initial_theta))
         acados_solver_mhe.set(j, "x", x_aug)
-
-
+        
 def run_mhe_estimation(
     mhe_model,
     acados_solver_factory,
@@ -59,10 +59,9 @@ def run_mhe_estimation(
     mhe_params,
     num_windows: int,
     r_inv: np.ndarray,
-    ridge_reg: float = 1.0,
+    ridge_reg: float = 1e-6,
     forgetting_factor: float = 0.95,   # λ
     initial_precision: np.ndarray = None,
-    compute_advanced_fim=True,
     plot: bool = True,
     progress_bar: bool = True,
 ) -> tuple[list[MheIterationResult], np.ndarray]:
@@ -73,15 +72,17 @@ def run_mhe_estimation(
     results = []
     # Инициализация
     if initial_precision is None:
-        P_inv = 1e-0 * np.eye(n_theta)
+        F = 1e-0 * np.eye(n_theta)
     else:
-        P_inv = initial_precision
+        F = initial_precision
     theta_prior = initial_theta
 
     iterator = range(num_windows)
     if progress_bar:
         iterator = tqdm(iterator, desc="MHE windows", unit="window")
 
+    cov_matrix = np.linalg.inv(F)           
+    print("cov_matrix initial: ",np.sqrt(np.maximum(np.diag(cov_matrix), 0.0)))
     for iter_idx in iterator:
         t_batch, control_sequence, state_sequence, _ = get_window_func(iter_idx)
         unknown_state_length = 0
@@ -90,30 +91,18 @@ def run_mhe_estimation(
         if iter_idx == 0:
             initial_x0 = get_initial_state_func(state_sequence[0], control_sequence[0], initial_theta)
 
-        # Вычисляем FIM для текущего окна
-        F_orig = None
-        if (compute_advanced_fim):
-            F_orig = mhe_model.compute_fim(control_sequence.shape[0], \
-                                           mhe_params.dt, \
-                                           control_sequence, \
-                                           initial_x0, \
-                                           theta_prior, \
-                                           r_inv)
-        else:
-            F_orig = mhe_model.compute_observed_fim(control_sequence.shape[0], \
-                                                    mhe_params.dt, \
-                                                    control_sequence, \
-                                                    state_sequence, \
-                                                    initial_x0, \
-                                                    theta_prior, \
-                                                    r_inv)
 
-        # Обновляем накопленную точность (информационную матрицу)
-        P_inv = forgetting_factor * P_inv + F_orig
-        F_reg, eig_orig, eig_reg = regularize_fim(P_inv, tau_ratio=1e-4, ridge=ridge_reg)
-        # if(len(F_reg) == 1):
-        #     F_reg = np.array([[1.0]])
-        # Настраиваем MHE с априорными параметрами и точностью
+        F_window = mhe_model.compute_fim(control_sequence.shape[0], \
+                                        mhe_params.dt, \
+                                        control_sequence, \
+                                        initial_x0, \
+                                        theta_prior, \
+                                        r_inv)
+
+
+        F = forgetting_factor * F + F_window
+        F_reg, eig_orig = regularize_fim(F, ridge=ridge_reg)
+
 
         set_mhe_solver(
             mhe_model, acados_solver_factory, state_sequence, control_sequence, initial_x0, theta_prior,
@@ -122,10 +111,9 @@ def run_mhe_estimation(
 
         status = acados_solver_factory.solve()
         if status != 0:
-            logger.warning(f"Window {iter_idx}: acados returned status {status}. Skipping this window.")
-            # При неудаче можно оставить старые параметры (theta_prior не менять)
-            # Но всё равно нужно сдвинуть окно? Пропускаем результат.
-            # Для простоты пропустим добавление в results и продолжим.
+            logger.warning(msg)
+            msg = f"Window {iter_idx}: acados returned status {status}. Skipping this window."
+            raise RuntimeError(msg)
             continue
 
         mhe_output = get_mhe_estimated_data(mhe_model, acados_solver_factory, N_measurement)
@@ -138,6 +126,9 @@ def run_mhe_estimation(
 
         # Сдвиг окна (для следующего шага)
         initial_x0 = sim_x_est[N_measurement - overlap_points]
+        cov_matrix = np.linalg.inv(F_reg)
+               
+        print("cov_matrix: ",np.sqrt(np.maximum(np.diag(cov_matrix), 0.0)))
 
         # Сохраняем результаты
         result = MheIterationResult(
@@ -147,7 +138,7 @@ def run_mhe_estimation(
             state_est=sim_x_est,
             noise_est=sim_w_est,
             param_est=theta_prior,
-            cov_matrix=np.linalg.inv(F_reg).flatten(),   # ковариация для отображения
+            cov_matrix=cov_matrix.flatten(),   # ковариация для отображения
             fim=F_reg,
             eigvals=eig_orig,
             status=status,
@@ -235,22 +226,15 @@ class MheEstimationData:
     cost_value: float        # final cost value
     sqp_iter: int            # number of SQP iterations
 
-
-def regularize_fim(m, tau_ratio=1e-3, min_tau=1e-2, ridge=1.0):
+def regularize_fim(m, ridge=1.0):
     m = (m + m.T) / 2.0
     eigvals, eigvecs = la.eigh(m)
     eigvals = eigvals[::-1]
     eigvecs = eigvecs[:, ::-1]
 
-    max_eig = eigvals[0]
-    tau = max(tau_ratio * max_eig, min_tau)
-
-    new_eigvals = np.maximum(eigvals, tau)   # для всех собственных чисел не меньше tau
-    m_reg = eigvecs @ np.diag(new_eigvals) @ eigvecs.T
-    m_reg += ridge * np.eye(m.shape[0])
+    m_reg = m + ridge * np.eye(m.shape[0])
     #F_reg = ridge * np.eye(F.shape[0])
-    return m_reg, eigvals, new_eigvals
-
+    return m_reg, eigvals
 
 def set_mhe_solver(mhe_model: MheModel,
                acados_solver_mhe: AcadosOcpSolver,
@@ -334,19 +318,43 @@ def make_system_trajectory(mhe_model: MheModel,
     return trajectory
 
 
-def plot_mhe_results(results, overlap=0, initial_params=None, theta_true=None,
+
+def plot_mhe_results(results, overlap=0, initial_params=None, initial_std=None,
+                     theta_true=None,
                      plot_states=True, plot_params=True,
                      plot_eigvals=True, plot_noise=True,
-                     plot_cost=True, plot_iter=True, plot_status=True, plot_cov_matrix=True,
+                     plot_cost=True, plot_iter=True, plot_status=True,
+                     plot_cov_matrix=True,
                      figsize=(15, 15), verbose=False):
     """
-    Plot aggregated results from a list of MheIterationResult.
+    Визуализация результатов MHE с интерактивным слайдером времени
+    и автоматическим масштабированием оси Y.
+
+    Параметры:
+    -----------
+    results : list of MheIterationResult
+        Список объектов с результатами каждого окна.
+    overlap : int
+        Число перекрывающихся точек между окнами.
+    initial_params : np.ndarray или None
+        Начальная оценка параметров (до первого окна) – размер (n_theta,).
+    initial_std : np.ndarray или None
+        Начальные стандартные отклонения параметров – размер (n_theta,).
+        Если None, используется std первого окна (с предупреждением).
+    theta_true : np.ndarray или None
+        Истинные значения параметров (для отрисовки горизонтальных линий).
+    plot_* : bool
+        Флаги включения отдельных графиков.
+    figsize : tuple
+        Размер фигуры.
+    verbose : bool
+        Печатать отладочную информацию.
     """
     if not results:
         print("No results to plot.")
         return
 
-    # Determine which subplots are active and in which order
+    # -------- Определение активных панелей --------
     active_plots = []
     if plot_states:   active_plots.append('states')
     if plot_params:   active_plots.append('params')
@@ -362,21 +370,19 @@ def plot_mhe_results(results, overlap=0, initial_params=None, theta_true=None,
         print("Nothing to plot.")
         return
 
-    # Height ratios: first plot (if states) gets double height, others get 1
-    ratios = [2 if p == 'states' else 1 for p in active_plots]
-
-    fig, axs = plt.subplots(n_plots, 1, figsize=figsize,
+    # Высоты: первая панель (если 'states') – 2, остальные – 1, слайдер – 0.2
+    ratios = [2 if p == 'states' else 1 for p in active_plots] + [0.2]
+    fig, axs = plt.subplots(n_plots + 1, 1, figsize=figsize,
                             gridspec_kw={'height_ratios': ratios},
                             squeeze=False)
     axs = axs.flatten()
-    plot_idx = 0
+    slider_ax = axs[-1]
+    plot_axes = axs[:-1]
+    axes_dict = dict(zip(active_plots, plot_axes))
 
-    # ----- Data concatenation -----
-    t_full = []
-    measured_full = []
-    estimated_full = []
-    params_full = []
-    std_full = []                     # стандартные отклонения для каждого окна
+    # -------- Склейка данных с учётом перекрытия --------
+    t_full, measured_full, estimated_full = [], [], []
+    params_full, std_full = [], []
 
     for idx, res in enumerate(results):
         t = np.asarray(res.t_batch)
@@ -385,11 +391,9 @@ def plot_mhe_results(results, overlap=0, initial_params=None, theta_true=None,
         params = np.asarray(res.param_est)
 
         n_points = min(len(t), len(est), len(meas))
-        t = t[:n_points]
-        meas = meas[:n_points]
-        est = est[:n_points]
+        t = t[:n_points]; meas = meas[:n_points]; est = est[:n_points]
 
-        # Ковариационная матрица окна -> стандартные отклонения
+        # Восстанавливаем std для этого окна
         cov_flat = res.cov_matrix
         n_theta = len(params) if params.ndim == 1 else params.shape[1]
         cov_mat = np.array(cov_flat).reshape(n_theta, n_theta)
@@ -403,11 +407,8 @@ def plot_mhe_results(results, overlap=0, initial_params=None, theta_true=None,
             params_2d = params[:n_points]
         std_2d = np.tile(std_window, (n_points, 1))
 
-        # Учёт перекрытия: обрезаем первые start точек для окон > 0
-        if idx == 0:
-            start = 0
-        else:
-            start = min(overlap, n_points) if overlap < n_points else n_points
+        # Учёт перекрытия
+        start = 0 if idx == 0 else min(overlap, n_points) if overlap < n_points else n_points
 
         t_full.extend(t[start:])
         measured_full.extend(meas[start:])
@@ -418,135 +419,189 @@ def plot_mhe_results(results, overlap=0, initial_params=None, theta_true=None,
         if verbose:
             print(f"Window {idx}: n_points={n_points}, start={start}, added={n_points - start}")
 
+    # Приводим к массивам и одинаковой длине
     t_full = np.array(t_full)
     measured_full = np.array(measured_full)
     estimated_full = np.array(estimated_full)
     params_full = np.array(params_full)
     std_full = np.array(std_full)
 
-    min_len = min(len(t_full), len(measured_full), len(estimated_full), len(params_full), len(std_full))
+    min_len = min(len(t_full), len(measured_full), len(estimated_full),
+                  len(params_full), len(std_full))
     t_full = t_full[:min_len]
     measured_full = measured_full[:min_len]
     estimated_full = estimated_full[:min_len]
     params_full = params_full[:min_len]
     std_full = std_full[:min_len]
 
-    for p in active_plots:
-        ax = axs[plot_idx]
-        plot_idx += 1
+    # -------- Отрисовка графиков --------
+    # 1. Состояния
+    if 'states' in axes_dict:
+        ax = axes_dict['states']
+        n_obs = measured_full.shape[1]
+        n_x = estimated_full.shape[1]
+        for i in range(n_obs):
+            ax.plot(t_full, measured_full[:, i], '--', label=f'Meas y_{i+1}')
+        for i in range(n_x):
+            ax.plot(t_full, estimated_full[:, i], '-', label=f'Est x_{i+1}')
+        ax.set_title("States: Measured (dashed) vs Estimated (solid)")
+        ax.set_xlabel("Time"); ax.set_ylabel("State")
+        ax.legend(); ax.grid(True)
 
-        if p == 'states':
-            ax.set_title("States: Measured (dashed) vs Estimated (solid)")
-            n_obs = measured_full.shape[1]
-            n_x = estimated_full.shape[1]
-            for i in range(n_obs):
-                ax.plot(t_full, measured_full[:, i], '--', label=f'Meas y_{i+1}')
-            for i in range(n_x):
-                ax.plot(t_full, estimated_full[:, i], '-', label=f'Est x_{i+1}')
-            ax.set_xlabel("Time")
-            ax.set_ylabel("State")
-            ax.legend()
-            ax.grid(True)
+    # 2. Параметры с доверительными интервалами
+    if 'params' in axes_dict:
+        ax = axes_dict['params']
+        ntheta = params_full.shape[1]
+        t_plot = t_full.copy()
+        p_plot = params_full.copy()
+        s_plot = std_full.copy()
 
-        elif p == 'params':
-            ax.set_title("Parameter estimates over time (shaded: ±1σ)")
-            ntheta = params_full.shape[1]
+        # Добавляем начальную точку, если заданы initial_params
+        if initial_params is not None:
+            if len(t_plot) > 1:
+                dt = t_plot[1] - t_plot[0]
+            else:
+                dt = 1.0
+            t_start = t_plot[0] - dt
 
-            t_plot = t_full.copy()
-            p_plot = params_full.copy()
-            s_plot = std_full.copy()
-
-            if initial_params is not None:
-                if len(t_plot) > 1:
-                    dt = t_plot[1] - t_plot[0]
-                else:
-                    dt = 1.0
-                t_start = t_plot[0] - dt
+            # Определяем начальные стандартные отклонения
+            if initial_std is not None:
+                init_std = np.asarray(initial_std).flatten()
+            else:
+                import warnings
+                warnings.warn("initial_std not provided, using std of first window.")
                 init_std = s_plot[0] if len(s_plot) > 0 else np.zeros(ntheta)
 
-                p_plot = np.vstack([initial_params, p_plot])
-                s_plot = np.vstack([init_std, s_plot])
-                t_plot = np.insert(t_plot, 0, t_start)
+            p_plot = np.vstack([initial_params, p_plot])
+            s_plot = np.vstack([init_std, s_plot])
+            t_plot = np.insert(t_plot, 0, t_start)
 
-            for i in range(ntheta):
-                ax.plot(t_plot, p_plot[:, i], label=f'θ_{i+1} estimated')
-                ax.fill_between(t_plot,
-                                p_plot[:, i] - s_plot[:, i],
-                                p_plot[:, i] + s_plot[:, i],
-                                alpha=0.2, label=f'θ_{i+1} ±1σ' if i == 0 else "")
+        for i in range(ntheta):
+            ax.plot(t_plot, p_plot[:, i], label=f'θ_{i+1} estimated')
+            ax.fill_between(t_plot,
+                            p_plot[:, i] - s_plot[:, i],
+                            p_plot[:, i] + s_plot[:, i],
+                            alpha=0.2, label=f'θ_{i+1} ±1σ' if i == 0 else "")
+        if theta_true is not None:
+            for i, val in enumerate(theta_true):
+                ax.axhline(y=val, linestyle=':', color=f'C{i}', alpha=0.8,
+                           label=f'θ_{i+1} true')
+        ax.set_title("Parameter estimates over time (shaded: ±1σ)")
+        ax.set_xlabel("Time"); ax.set_ylabel("Parameter value")
+        ax.legend(); ax.grid(True)
 
-            if theta_true is not None:
-                for i, val in enumerate(theta_true):
-                    ax.axhline(y=val, linestyle=':', color=f'C{i}', alpha=0.8,
-                               label=f'θ_{i+1} true')
-            ax.set_xlabel("Time")
-            ax.set_ylabel("Parameter value")
-            ax.legend()
-            ax.grid(True)
+    # 3. Собственные числа FIM
+    if 'eigvals' in axes_dict:
+        ax = axes_dict['eigvals']
+        n_theta = results[0].eigvals.shape[0]
+        eig_vals_matrix = np.array([res.eigvals for res in results])
+        eig_vals_sorted = np.sort(eig_vals_matrix, axis=1)[:, ::-1]
+        for i in range(n_theta):
+            ax.semilogy(eig_vals_sorted[:, i], marker='o', label=f'λ_{i+1}')
+        ax.set_title("FIM eigenvalues per window (log scale)")
+        ax.set_xlabel("Window index"); ax.set_ylabel("Eigenvalue magnitude")
+        ax.legend(); ax.grid(True, which='both', linestyle='--', alpha=0.7)
 
-        elif p == 'eigvals':
-            ax.set_title("FIM eigenvalues per window (log scale)")
-            n_theta = results[0].eigvals.shape[0]
-            eig_vals_matrix = np.array([res.eigvals for res in results])
-            eig_vals_sorted = np.sort(eig_vals_matrix, axis=1)[:, ::-1]
-            for i in range(n_theta):
-                ax.semilogy(eig_vals_sorted[:, i], marker='o', label=f'λ_{i+1}')
-            ax.set_xlabel("Window index")
-            ax.set_ylabel("Eigenvalue magnitude")
-            ax.legend()
-            ax.grid(True, which='both', linestyle='--', alpha=0.7)
+    # 4. Стандартные отклонения параметров (отдельный график)
+    if 'cov_matrix' in axes_dict:
+        ax = axes_dict['cov_matrix']
+        n_theta = results[0].eigvals.shape[0]
+        std_per_window = []
+        for res in results:
+            cov_flat = res.cov_matrix
+            cov_mat = np.array(cov_flat).reshape(n_theta, n_theta)
+            diag = np.diag(cov_mat)
+            std = np.sqrt(np.maximum(diag, 0.0))
+            std_per_window.append(std)
+        std_per_window = np.array(std_per_window)
+        for i in range(n_theta):
+            ax.plot(range(len(std_per_window)), std_per_window[:, i], marker='o',
+                    label=f'θ_{i+1} std')
+        ax.set_title("Parameter standard deviation (sqrt of diag(cov))")
+        ax.set_xlabel("Window index"); ax.set_ylabel("Standard deviation")
+        ax.legend(); ax.grid(True)
 
-        elif p == 'cov_matrix':
-            ax.set_title("Parameter standard deviation (sqrt of diag(cov))")
-            n_theta = results[0].eigvals.shape[0]
-            std_per_window = []
-            for res in results:
-                cov_flat = res.cov_matrix
-                cov_mat = np.array(cov_flat).reshape(n_theta, n_theta)
-                diag = np.diag(cov_mat)
-                std = np.sqrt(np.maximum(diag, 0.0))
-                std_per_window.append(std)
-            std_per_window = np.array(std_per_window)
-            for i in range(n_theta):
-                ax.plot(range(len(std_per_window)), std_per_window[:, i], marker='o', label=f'θ_{i+1} std')
-            ax.set_xlabel("Window index")
-            ax.set_ylabel("Standard deviation")
-            ax.legend()
-            ax.grid(True)
+    # 5. Распределение шума процесса
+    if 'noise' in axes_dict:
+        ax = axes_dict['noise']
+        all_noise = np.concatenate([res.noise_est.flatten() for res in results])
+        ax.hist(all_noise, bins=50, alpha=0.7, density=True)
+        ax.set_title("Process noise distribution")
+        ax.set_xlabel("Noise value"); ax.set_ylabel("Density")
+        ax.grid(True)
 
-        elif p == 'noise':
-            ax.set_title("Process noise distribution")
-            all_noise = np.concatenate([res.noise_est.flatten() for res in results])
-            ax.hist(all_noise, bins=50, alpha=0.7, density=True)
-            ax.set_xlabel("Noise value")
-            ax.set_ylabel("Density")
-            ax.grid(True)
+    # 6. Стоимость
+    if 'cost' in axes_dict:
+        ax = axes_dict['cost']
+        cost_vals = [res.cost_value for res in results]
+        ax.plot(range(len(cost_vals)), cost_vals, marker='o')
+        ax.set_title("Cost value per window")
+        ax.set_xlabel("Window index"); ax.set_ylabel("Cost")
+        ax.grid(True); ax.set_yscale('log')
 
-        elif p == 'cost':
-            ax.set_title("Cost value per window")
-            cost_vals = [res.cost_value for res in results]
-            ax.plot(range(len(cost_vals)), cost_vals, marker='o')
-            ax.set_xlabel("Window index")
-            ax.set_ylabel("Cost")
-            ax.grid(True)
-            ax.set_yscale('log')
+    # 7. Итерации SQP
+    if 'iter' in axes_dict:
+        ax = axes_dict['iter']
+        iter_vals = [res.sqp_iter for res in results]
+        ax.plot(range(len(iter_vals)), iter_vals, marker='o')
+        ax.set_title("SQP iterations per window")
+        ax.set_xlabel("Window index"); ax.set_ylabel("Iterations")
+        ax.grid(True)
 
-        elif p == 'iter':
-            ax.set_title("SQP iterations per window")
-            iter_vals = [res.sqp_iter for res in results]
-            ax.plot(range(len(iter_vals)), iter_vals, marker='o')
-            ax.set_xlabel("Window index")
-            ax.set_ylabel("Iterations")
-            ax.grid(True)
+    # 8. Статус солвера
+    if 'status' in axes_dict:
+        ax = axes_dict['status']
+        status_vals = [res.status for res in results]
+        ax.plot(range(len(status_vals)), status_vals, marker='o', linestyle='-')
+        ax.set_title("Solver status per window (0 = success)")
+        ax.set_xlabel("Window index"); ax.set_ylabel("Status")
+        ax.set_yticks(sorted(set(status_vals)))
+        ax.grid(True)
 
-        elif p == 'status':
-            ax.set_title("Solver status per window (0 = success)")
-            status_vals = [res.status for res in results]
-            ax.plot(range(len(status_vals)), status_vals, marker='o', linestyle='-')
-            ax.set_xlabel("Window index")
-            ax.set_ylabel("Status")
-            ax.set_yticks(sorted(set(status_vals)))
-            ax.grid(True)
+    # -------- Интерактивный слайдер времени с авто-масштабированием Y --------
+    time_axes = []
+    if 'states' in axes_dict:
+        time_axes.append(axes_dict['states'])
+    if 'params' in axes_dict:
+        time_axes.append(axes_dict['params'])
+
+    if time_axes and len(t_full) > 1:
+        t_min, t_max = t_full.min(), t_full.max()
+        slider = RangeSlider(slider_ax, "Time", t_min, t_max, valinit=(t_min, t_max))
+
+        def update_ylims(ax, t_left, t_right):
+            """Пересчитывает пределы Y по видимым данным."""
+            lines = ax.get_lines()
+            if not lines:
+                return
+            y_min = np.inf
+            y_max = -np.inf
+            for line in lines:
+                xdata = np.asarray(line.get_xdata())
+                ydata = np.asarray(line.get_ydata())
+                mask = (xdata >= t_left) & (xdata <= t_right)
+                if mask.any():
+                    y_min = min(y_min, np.nanmin(ydata[mask]))
+                    y_max = max(y_max, np.nanmax(ydata[mask]))
+            if np.isfinite(y_min) and np.isfinite(y_max):
+                margin = 0.05 * (y_max - y_min) or 0.1 * max(abs(y_min), 1e-6)
+                ax.set_ylim(y_min - margin, y_max + margin)
+
+        def update_xlim(val):
+            t_left, t_right = val
+            for ax in time_axes:
+                ax.set_xlim(t_left, t_right)
+                update_ylims(ax, t_left, t_right)
+            fig.canvas.draw_idle()
+
+        slider.on_changed(update_xlim)
+        # Инициализируем Y пределы для полного диапазона
+        for ax in time_axes:
+            update_ylims(ax, t_min, t_max)
+        slider_ax.set_xlabel('Time')
+        slider_ax.xaxis.set_label_coords(0.5, -0.5)
+    else:
+        slider_ax.set_visible(False)
 
     plt.tight_layout()
     plt.show()
