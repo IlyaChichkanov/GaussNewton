@@ -9,7 +9,7 @@ from mhe.mhe_base_model_interface import MheModel
 from matplotlib.widgets import RangeSlider
 from tqdm import tqdm
 from typing import List, Optional
-import casadi as ca
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
