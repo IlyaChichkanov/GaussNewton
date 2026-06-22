@@ -565,8 +565,7 @@ class MHESyntheticDataGenerator:
             tuple: (t, u, full_states, measured_states)
         """
         if sigma is None:
-            sigma = self.sigma
-
+            sigma = [0] * self.meas_dim
         # Get control inputs at each time point
         u = np.zeros((len(t), self.control_dim))
         for i, ti in enumerate(t):
@@ -575,22 +574,19 @@ class MHESyntheticDataGenerator:
         # Integrate system to obtain full states
         full_states = self.system.get_solution(c0, theta, t).T  # shape (len(t), state_dim)
 
-        # Add measurement noise
-        mean = np.zeros(self.state_dim)
-        cov = np.diag([sigma**2] * self.state_dim)
-        noise = np.random.multivariate_normal(mean, cov, len(t))
-        noisy_full = full_states + noise
-
         # Compute measured outputs
         measured = np.zeros((len(t), self.meas_dim))
-        for i, state in enumerate(noisy_full):
+        for i, state in enumerate(full_states):
             measured[i] = self.system.h_x(state, t[i], theta)
            
-
-        return t, u, noisy_full, measured
+        mean = np.zeros(self.meas_dim)
+        cov = np.diag(sigma**2)
+        noise = np.random.multivariate_normal(mean, cov, len(t))
+        measured += noise
+        return t, u, full_states, measured
 
     def generate_sliding_windows_exact(self, c0, theta, t0, tf, num_windows,
-                                       n_measurement, overlap_points=1, sigma=None):
+                                       n_measurement, overlap_points=1):
         """
         Generate overlapping windows that each cover exactly T_f seconds.
 
@@ -624,7 +620,7 @@ class MHESyntheticDataGenerator:
 
         # Generate the long trajectory
         t_long, u_long, full_long, meas_long = self._generate_trajectory(
-            c0, theta, t_long, sigma
+            c0, theta, t_long, self.sigma
         )
 
         # Extract windows

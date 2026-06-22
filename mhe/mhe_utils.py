@@ -8,7 +8,8 @@ from acados_template import AcadosOcpSolver
 from mhe.mhe_base_model_interface import MheModel
 from matplotlib.widgets import RangeSlider
 from tqdm import tqdm
-
+from typing import List, Optional
+import casadi as ca
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -30,124 +31,259 @@ class MheIterationResult:
     cost_value: float
     sqp_iter: int
 
+import numpy as np
+from mhe.mhe_base_model_interface import MheModel
+
+class ArrivalCostUpdater:
+    def __init__(self, mhe_model: MheModel, dt: float, Q_state_diag=1e-4,
+                 initial_x0=None, initial_theta=None, initial_Sigma=None):
+        self.mhe_model = mhe_model
+        self.nx = mhe_model.state_length
+        self.np = mhe_model.param_length
+        self.n_aug = self.nx + self.np
+        self.dt = dt
+
+        # Функция одного шага с якобианами (создаётся один раз)
+        self.step_func = mhe_model.create_step_function(dt, "ekf_step")
+
+        # Начальная ковариация
+        if initial_Sigma is not None:
+            self.Sigma = initial_Sigma
+        else:
+            # Большая начальная неопределённость
+            self.Sigma = np.eye(self.n_aug)
+
+        # Начальная оценка расширенного состояния
+        if initial_x0 is not None and initial_theta is not None:
+            self.x_aug_est = np.hstack([initial_x0, initial_theta])
+        else:
+            self.x_aug_est = np.zeros(self.n_aug)
+
+        # Ковариация шума процесса
+        self.Q = np.diag(np.concatenate([
+            np.full(self.nx, Q_state_diag),
+            np.zeros(self.np)   # параметры постоянны
+        ]))
+
+    def _compute_full_A(self, x, theta, u):
+        """Вычисляет матрицу A для расширенного состояния в точке (x,theta,u)."""
+        res = self.step_func(x=x, theta=theta, u=u)
+        J_x = np.array(res['Jx'])
+        J_theta = np.array(res['Jtheta'])
+        A = np.zeros((self.n_aug, self.n_aug))
+        A[:self.nx, :self.nx] = J_x
+        A[:self.nx, self.nx:] = J_theta
+        A[self.nx:, self.nx:] = np.eye(self.np)
+        return A
+
+    def _predict_single_step(self, x, theta, u):
+        """Один шаг EKF‑предсказания. Обновляет внутреннюю Sigma и x_aug_est."""
+        A = self._compute_full_A(x, theta, u)
+        # Предсказание ковариации
+        Sigma_pred = A @ self.Sigma @ A.T + self.Q
+        # Предсказание состояния (для следующего шага)
+        x_next = np.array(self.step_func(x=x, theta=theta, u=u)["x_next"]).flatten()
+        # Обновляем внутренние переменные
+        self.Sigma = Sigma_pred
+        self.x_aug_est = np.hstack([x_next, theta])
+        return x_next, theta
+
+    def predict_multistep(self, L, U_list):
+        """
+        L шагов EKF‑предсказания.
+        U_list: массив управлений (L, nu) для шагов от предыдущего начального состояния к новому.
+        После вызова self.Sigma и self.x_aug_est соответствуют началу нового окна.
+        Возвращает P_aug = inv(Sigma) для передачи в MHE.
+        """
+        x = self.x_aug_est[:self.nx]
+        theta = self.x_aug_est[self.nx:]
+        for k in range(L):
+            u = U_list[k, :]
+            x, theta = self._predict_single_step(x, theta, u)
+        return np.linalg.inv(self.Sigma)
+
+    def correct(self, F_aug, x_aug_opt):
+        """
+        Шаг коррекции после MHE.
+        F_aug: полная информационная матрица Фишера (n_aug × n_aug) текущего окна.
+        x_aug_opt: оптимальная оценка начального состояния окна (nx+np,).
+        """
+        Y_prior = np.linalg.inv(self.Sigma)
+        Y_post = Y_prior + F_aug
+        self.Sigma = np.linalg.inv(Y_post)
+        self.x_aug_est = x_aug_opt
+        
+
 
 def reset_mhe_solver(mhe_model: MheModel,
-               acados_solver_mhe: AcadosOcpSolver,
-               control_sequence: np.array,
-               initial_x0: np.array,
-               initial_theta: np.array,
-               horizon: int) -> tuple:
-    assert (len(initial_x0) == mhe_model.state_length)
-    assert (len(initial_theta) == mhe_model.param_length)
-    assert control_sequence.shape[0] >= horizon, f"control_sequence должен содержать хотя бы {horizon} строк"
+                     acados_solver_mhe: AcadosOcpSolver,
+                     control_sequence: np.array,
+                     initial_x0: np.array,
+                     initial_theta: np.array,
+                     horizon: int,
+                     dt: float) -> None:
+    """
+    Сбрасывает начальное приближение для всех узлов MHE солвера,
+    интегрируя модель вдоль горизонта с помощью create_step_function.
+    """
+    assert len(initial_x0) == mhe_model.state_length
+    assert len(initial_theta) == mhe_model.param_length
+    assert control_sequence.shape[0] >= horizon
 
+    # Функция одного шага (без якобианов нам достаточно)
+    step_func = mhe_model.create_step_function(dt, "reset_traj")
     x_sim = initial_x0.copy()
 
-    #integrate_f = mhe_model.create_integrate_function(0.02, "integrate")
     for j in range(horizon):
-        # Формируем расширенный вектор состояния + параметров
         x_aug = np.hstack((x_sim, initial_theta))
         acados_solver_mhe.set(j, "x", x_aug)
-        
+
+        if j < horizon - 1:
+            # step_func возвращает [x_next, J_x, J_theta] – берём первый элемент
+            res = step_func(x=x_sim, theta=initial_theta, u=control_sequence[j, :])
+            x_sim = np.array(res['x_next']).flatten()   # или res['x_next']
+
+
+@dataclass
+class MheIterationResult:
+    """Хранит результаты одного окна MHE."""
+    t_batch: np.ndarray
+    state_sequence: np.ndarray
+    control_sequence: np.ndarray
+    state_est: np.ndarray
+    noise_est: np.ndarray
+    param_est: np.ndarray
+    cov_matrix: np.ndarray
+    fim: np.ndarray
+    eigvals: np.ndarray
+    status: int
+    cost_value: float
+    sqp_iter: int
+
 def run_mhe_estimation(
-    mhe_model,
-    acados_solver_factory,
+    mhe_model: MheModel,
+    acados_solver_factory: AcadosOcpSolver,
     get_window_func,
     get_initial_state_func,
     overlap_points: int,
     initial_theta: np.ndarray,
     mhe_params,
     num_windows: int,
+    dt: float,
     r_inv: np.ndarray,
+    Q_state_diag: float = 1e-4,
+    initial_Sigma: Optional[np.ndarray] = None,
     ridge_reg: float = 1e-6,
-    forgetting_factor: float = 0.95,   # λ
-    initial_precision: np.ndarray = None,
-    plot: bool = True,
+    plot: bool = False,
     progress_bar: bool = True,
-) -> tuple[list[MheIterationResult], np.ndarray]:
+) -> List[MheIterationResult]:
+    """
+    Запуск MHE на последовательности окон с EKF-обновлением априорной ковариации.
+    """
     N_measurement = mhe_params.mhe_horizont
-    n_theta = mhe_model.param_length
-    n_obs = mhe_model.obs_length
     nx = mhe_model.state_length
+    n_theta = mhe_model.param_length
     results = []
-    # Инициализация
-    if initial_precision is None:
-        F = 1e-0 * np.eye(n_theta)
-    else:
-        F = initial_precision
-    theta_prior = initial_theta
+
+    # --- Инициализация ArrivalCostUpdater ---
+    updater = ArrivalCostUpdater(
+        mhe_model, dt, Q_state_diag=Q_state_diag,
+        initial_x0=np.zeros(nx),           # будет переопределено на первом окне
+        initial_theta=initial_theta,
+        initial_Sigma=initial_Sigma
+    )
+
+    first_window = True
+    # Переменная для хранения управлений предыдущего окна (нужна для предсказания)
+    control_sequence_prev = None
 
     iterator = range(num_windows)
     if progress_bar:
         iterator = tqdm(iterator, desc="MHE windows", unit="window")
 
-    cov_matrix = np.linalg.inv(F)           
-    print("cov_matrix initial: ",np.sqrt(np.maximum(np.diag(cov_matrix), 0.0)))
     for iter_idx in iterator:
+        # 1. Получаем данные окна
         t_batch, control_sequence, state_sequence, _ = get_window_func(iter_idx)
-        unknown_state_length = 0
-        state_sequence = np.hstack((state_sequence, np.zeros((state_sequence.shape[0], unknown_state_length))))
 
-        if iter_idx == 0:
-            initial_x0 = get_initial_state_func(state_sequence[0], control_sequence[0], initial_theta)
+        if first_window:
+            initial_x0 = get_initial_state_func(
+                state_sequence[0], control_sequence[0], initial_theta
+            )
+            updater.x_aug_est = np.hstack([initial_x0, initial_theta])
+            first_window = False
 
+        # 3. Предсказание EKF (кроме первого окна)
+        if iter_idx > 0:
+            # Число шагов от начала предыдущего окна до начала текущего
+            L = N_measurement - overlap_points
+            # Управления, которые переводят систему из предыдущего начального состояния в новое
+            P_aug = updater.predict_multistep(L, control_sequence_prev[:L, :])
+        else:
+            P_aug = np.linalg.inv(updater.Sigma)
 
-        F_window = mhe_model.compute_fim(control_sequence.shape[0], \
-                                        mhe_params.dt, \
-                                        control_sequence, \
-                                        initial_x0, \
-                                        theta_prior, \
-                                        r_inv)
+        # Сохраняем управления этого окна для следующего шага
+        control_sequence_prev = control_sequence.copy()
 
-
-        F = forgetting_factor * F + F_window
-        F_reg, eig_orig = regularize_fim(F, ridge=ridge_reg)
-
-
+        # 4. Установка параметров солвера и сброс траектории
         set_mhe_solver(
-            mhe_model, acados_solver_factory, state_sequence, control_sequence, initial_x0, theta_prior,
-            N_measurement, F_reg   # P0 = накопленная точность
+            mhe_model, acados_solver_factory,
+            state_sequence, control_sequence,
+            updater.x_aug_est[:nx], updater.x_aug_est[nx:],
+            N_measurement, P_aug
+        )
+        reset_mhe_solver(
+            mhe_model, acados_solver_factory,
+            control_sequence,
+            updater.x_aug_est[:nx], updater.x_aug_est[nx:],
+            N_measurement, dt
         )
 
+        # 5. Решение MHE
         status = acados_solver_factory.solve()
         if status != 0:
+            msg = f"Window {iter_idx}: acados returned status {status}. Skipping."
             logger.warning(msg)
-            msg = f"Window {iter_idx}: acados returned status {status}. Skipping this window."
-            raise RuntimeError(msg)
             continue
 
+        # 6. Извлечение результатов
         mhe_output = get_mhe_estimated_data(mhe_model, acados_solver_factory, N_measurement)
         sim_x_est = mhe_output.sim_x_est
         sim_w_est = mhe_output.sim_w_est
-        theta_new = mhe_output.sim_param_est
+        theta_opt = np.asarray(mhe_output.sim_param_est).flatten()
 
-        # Обновляем априорные параметры для следующего окна
-        theta_prior = theta_new
+        # 7. Полная FIM для коррекции
+        x0_opt = np.asarray(sim_x_est[0]).flatten() # начальное состояние окна (оптимальное)
+        N_actual = control_sequence.shape[0] - overlap_points
+        F_aug = mhe_model.compute_augmented_fim(
+            N_actual, dt, control_sequence[:N_actual, :],
+            x0_opt.flatten(), theta_opt.flatten(), r_inv
+        )
+        F_aug_reg, eigvals = regularize_fim(F_aug, ridge=ridge_reg)
 
-        # Сдвиг окна (для следующего шага)
-        initial_x0 = sim_x_est[N_measurement - overlap_points]
-        cov_matrix = np.linalg.inv(F_reg)
-               
-        print("cov_matrix: ",np.sqrt(np.maximum(np.diag(cov_matrix), 0.0)))
+        # 8. Коррекция ковариации
+        x_aug_opt = np.hstack([x0_opt, theta_opt])
+        updater.correct(F_aug_reg, x_aug_opt)
 
-        # Сохраняем результаты
+        # 9. Сохранение результатов
         result = MheIterationResult(
             t_batch=t_batch,
             state_sequence=state_sequence,
             control_sequence=control_sequence,
             state_est=sim_x_est,
             noise_est=sim_w_est,
-            param_est=theta_prior,
-            cov_matrix=cov_matrix.flatten(),   # ковариация для отображения
-            fim=F_reg,
-            eigvals=eig_orig,
+            param_est=theta_opt,
+            cov_matrix = updater.Sigma[nx:, nx:].flatten(),  # для графика апостериорная ковариация
+            fim=F_aug_reg,
+            eigvals=eigvals,
             status=status,
             cost_value=mhe_output.cost_value,
             sqp_iter=mhe_output.sqp_iter
         )
         results.append(result)
 
+        # 10. Опциональный график
         if plot:
+            import matplotlib.pyplot as plt
             plt.plot(t_batch, state_sequence, 'g', label='measured')
             plt.plot(t_batch, sim_x_est[:-1], 'b', label='estimated')
             plt.title(f"Window {iter_idx}")
@@ -155,7 +291,6 @@ def run_mhe_estimation(
             plt.show()
 
     return results
-
 
 def plot_mhe_data_windows(t_windows, u_windows, meas_windows, full_windows=None,
                           max_windows=4, state_idx=None):
@@ -317,7 +452,9 @@ def make_system_trajectory(mhe_model: MheModel,
         trajectory[j + 1] = x_sim
     return trajectory
 
-
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.widgets import RangeSlider
 
 def plot_mhe_results(results, overlap=0, initial_params=None, initial_std=None,
                      theta_true=None,
@@ -451,44 +588,61 @@ def plot_mhe_results(results, overlap=0, initial_params=None, initial_std=None,
     # 2. Параметры с доверительными интервалами
     if 'params' in axes_dict:
         ax = axes_dict['params']
-        ntheta = params_full.shape[1]
-        t_plot = t_full.copy()
-        p_plot = params_full.copy()
-        s_plot = std_full.copy()
+        # Число параметров определяем по данным окон, а если их нет, то по initial_params или theta_true
+        if params_full.size > 0:
+            ntheta = params_full.shape[1]
+        elif initial_params is not None:
+            ntheta = len(initial_params)
+        elif theta_true is not None:
+            ntheta = len(theta_true)
+        else:
+            ntheta = 0
 
-        # Добавляем начальную точку, если заданы initial_params
-        if initial_params is not None:
-            if len(t_plot) > 1:
-                dt = t_plot[1] - t_plot[0]
-            else:
-                dt = 1.0
-            t_start = t_plot[0] - dt
+        if ntheta == 0:
+            print("Warning: Could not determine number of parameters, skipping 'params' plot.")
+            axes_dict['params'].set_visible(False)
+        else:
+            t_plot = t_full.copy()
+            p_plot = params_full.copy()
+            s_plot = std_full.copy()
 
-            # Определяем начальные стандартные отклонения
-            if initial_std is not None:
-                init_std = np.asarray(initial_std).flatten()
-            else:
-                import warnings
-                warnings.warn("initial_std not provided, using std of first window.")
-                init_std = s_plot[0] if len(s_plot) > 0 else np.zeros(ntheta)
+            # Добавляем начальную точку, если заданы initial_params
+            if initial_params is not None:
+                if len(t_plot) > 1:
+                    dt = t_plot[1] - t_plot[0]
+                else:
+                    # Если всего одна точка окна, берём средний шаг из первого окна
+                    dt = np.mean(np.diff(results[0].t_batch)) if len(results[0].t_batch) > 1 else 1.0
+                t_start = t_plot[0] - dt
 
-            p_plot = np.vstack([initial_params, p_plot])
-            s_plot = np.vstack([init_std, s_plot])
-            t_plot = np.insert(t_plot, 0, t_start)
+                # Проверка/задание начального std
+                if initial_std is not None:
+                    init_std = np.asarray(initial_std).flatten()
+                    if len(init_std) != ntheta:
+                        raise ValueError(f"initial_std length {len(init_std)} != ntheta {ntheta}")
+                else:
+                    import warnings
+                    warnings.warn("initial_std not provided, using std of first window for initial point.")
+                    init_std = s_plot[0] if len(s_plot) > 0 else np.zeros(ntheta)
 
-        for i in range(ntheta):
-            ax.plot(t_plot, p_plot[:, i], label=f'θ_{i+1} estimated')
-            ax.fill_between(t_plot,
-                            p_plot[:, i] - s_plot[:, i],
-                            p_plot[:, i] + s_plot[:, i],
-                            alpha=0.2, label=f'θ_{i+1} ±1σ' if i == 0 else "")
-        if theta_true is not None:
-            for i, val in enumerate(theta_true):
-                ax.axhline(y=val, linestyle=':', color=f'C{i}', alpha=0.8,
-                           label=f'θ_{i+1} true')
-        ax.set_title("Parameter estimates over time (shaded: ±1σ)")
-        ax.set_xlabel("Time"); ax.set_ylabel("Parameter value")
-        ax.legend(); ax.grid(True)
+                # Вставляем начальные значения
+                p_plot = np.vstack([initial_params, p_plot])
+                s_plot = np.vstack([init_std, s_plot])
+                t_plot = np.insert(t_plot, 0, t_start)
+
+            for i in range(ntheta):
+                ax.plot(t_plot, p_plot[:, i], label=f'θ_{i+1} estimated')
+                ax.fill_between(t_plot,
+                                p_plot[:, i] - s_plot[:, i],
+                                p_plot[:, i] + s_plot[:, i],
+                                alpha=0.2, label=f'θ_{i+1} ±1σ' if i == 0 else "")
+            if theta_true is not None:
+                for i, val in enumerate(theta_true):
+                    ax.axhline(y=val, linestyle=':', color=f'C{i}', alpha=0.8,
+                               label=f'θ_{i+1} true')
+            ax.set_title("Parameter estimates over time (shaded: ±1σ)")
+            ax.set_xlabel("Time"); ax.set_ylabel("Parameter value")
+            ax.legend(); ax.grid(True)
 
     # 3. Собственные числа FIM
     if 'eigvals' in axes_dict:

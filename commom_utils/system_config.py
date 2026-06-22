@@ -6,7 +6,7 @@ def get_input_signals_bycicle(t):
     w = 2.7
     steering = 0.8 * jnp.cos(t * 0.25 * w) * jnp.sin(w * t)
     v = 10.0
-    if(t < 3):
+    if(t < 10):
         steering = 0
     return [v, steering]          # порядок: steering, vx (как ожидает LateralCarDynamic)
 

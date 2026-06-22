@@ -32,25 +32,27 @@ def harmonic(t):
 
 
 SYSTEM_CONFIGS = {
-    # "DelaySystem": {
-    #     "class": DelaySystem,
-    #     "args": [2],
-    #     "c0": np.array([0.0, 0.0]),
-    #     "theta_true": np.array([0.4]),
-    #     "delta_theta": np.array([0.2]),
-    #     "input_signal": lambda t: harmonic(t),         #
-    #     #"observation": lambda state, theta, u: state,  # по умолчанию весь state
-    #     "get_initial_state": lambda y_meas, u, theta: np.hstack((u, 0))
-    # },
+    "DelaySystem": {
+        "class": DelaySystem,
+        "args": [2],
+        "c0": np.array([0.0, 0.0]),
+        "theta_true": np.array([0.4]),
+        "delta_theta": np.array([0.2]),
+        "input_signal": lambda t: harmonic(t),         #
+        #"observation": lambda state, theta, u: state,  # по умолчанию весь state
+        "get_initial_state": lambda y_meas, u, theta: np.hstack((u, 0)),
+        "sigma_noise" :np.array([0.01])
+    },
 
     "KinematicBycicle": {
         "class": KinematicModel,                     # модель из MHE (возможно, упрощённая)
         "args": [2.65, True],                                # wheelbase
         "c0": np.array([0.0]),                         # одномерное состояние? Уточните
-        "theta_true": np.array([0.05, np.deg2rad(0.0)]),
+        "theta_true": np.array([0.05, np.deg2rad(0.5)]),
         "delta_theta": np.array([0.01, np.deg2rad(1.0)]),
         "input_signal": get_input_signals_bycicle,
         "get_initial_state": lambda y_meas, u, theta: y_meas[0:1],
+        "sigma_noise" :np.array([0.01, 0.01])
     },
 
 }
@@ -58,10 +60,10 @@ SYSTEM_CONFIGS = {
 
 MHE_CONFIGS = {
     "KinematicBycicle": {
-        "measurements_residual_r": np.diag([1.0, 1.0]),
+        "measurements_residual_r": np.diag([0.000001, 1.0]),
         "state_prior_q0": np.diag([1.0]),
         "noise_peanlty_w": np.eye(1) * 1e3,
-        "fim_scaler": 0.2,
+        "fim_scaler": 1.0,
         "bounds_noise": [[-0.01, 0.01]],
         "bounds_state": [[-np.inf, np.inf]],
         "bounds_param": [np.deg2rad([-5, 5]), [-1, 1]],
@@ -148,15 +150,16 @@ def test_mhe_identification(system_config, tmp_path):
             return ocp_mhe
 
     generator = TestGenerator()
-    acados_solver = generator.generate_code()
-
-    data_gen = MHESyntheticDataGenerator(system, sigma=0.0)   # no noise for test
+    acados_solver_mhe = generator.generate_code()
+    sigma = system_config["sigma_noise"]
+    assert len(sigma) == system.n_obs
+    data_gen = MHESyntheticDataGenerator(system, sigma=sigma)   # no noise for test
 
     t0 = 0.0
     T_f = mhe_params.dt * mhe_params.mhe_horizont
     N_meas = mhe_params.mhe_horizont
-    overlap_points = int(N_meas * 0.5)
-    num_windows = 20
+    overlap_points = int(N_meas * 0.9)
+    num_windows = 80
 
     t_windows, u_windows, meas_windows, _ = data_gen.generate_sliding_windows_exact(
         c0=c0,
@@ -173,32 +176,41 @@ def test_mhe_identification(system_config, tmp_path):
 
     initial_theta = delta_theta + theta_true
 
+    # Инициализация
+    dt = mhe_params.dt
+    nx = generator.get_model().state_length
+    n_theta = generator.get_model().param_length
     reset_mhe_solver(generator.get_model(),
-                    acados_solver,
+                    acados_solver_mhe,
                     u_windows[0],
                     system.get_initial_state(meas_windows[0][0], u_windows[0][0], initial_theta),
                     initial_theta,
-                    N_meas
-                    )
-    initial_std = np.abs(initial_theta - theta_true)
+                    N_meas,
+                    dt)
+    # Априорная неопределённость параметров (например, ±2 сигмы от возмущения)
+    initial_std = np.abs(delta_theta) * 1.5
 
-    initial_std = np.abs(delta_theta) * 1.0 
-    initial_precision = np.diag(1/initial_std**2)
+    # Начальная ковариационная матрица расширенного состояния
+    initial_Sigma = np.eye(nx + n_theta)
+    initial_Sigma[:nx, :nx] *= 1e3          # большая неопределённость для состояний
+    initial_Sigma[nx:, nx:] = np.diag(initial_std ** 2)   # умеренная для параметров
 
+    # Запуск MHE
     results = run_mhe_estimation(
         mhe_model=generator.get_model(),
-        acados_solver_factory=acados_solver,
+        acados_solver_factory=acados_solver_mhe,
         get_window_func=get_window,
         get_initial_state_func=system.get_initial_state,
         overlap_points=overlap_points,
-        initial_theta=initial_theta,
+        initial_theta=initial_theta,               # начальная оценка параметров
         mhe_params=mhe_params,
         num_windows=num_windows,
-        initial_precision = initial_precision,
-        ridge_reg=1e-6,
-        r_inv=mhe_params.measurements_residual_r,
-        forgetting_factor=1.0,
-        plot=False
+        dt=dt,                                     # шаг дискретизации
+        r_inv=mhe_params.measurements_residual_r,  # весовая матрица измерений
+        Q_state_diag=1e-6,                         # шум процесса (состояния)
+        initial_Sigma=initial_Sigma,               # начальная ковариация
+        ridge_reg=1e-6,                            # регуляризация FIM
+        plot=False                                 # не показывать графики в цикле
     )
     final_theta_est = results[-1].param_est
     rel_error = np.abs((final_theta_est - theta_true) / theta_true)
