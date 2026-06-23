@@ -65,7 +65,22 @@ class Pendulum(ODESystem):
     def get_input_signals(self, t):
         return [jnp.sin(0.2*t)]
 
+class DelayOffset(ODESystem):
+    def __init__(self, order=2):
+        self.order = order
+        self.delay = DelaySystem(order=order)
+        nx_total = 0 + self.delay.nx
+        np_total = 1 + self.delay.np   # offset + tau_d
+        nu_total = 1
+        super().__init__(nx=nx_total, np=np_total, nu=nu_total)
 
+    def get_derivative(self, state, theta, u):
+        return self.delay.get_derivative(state, theta, u)
+
+    def observation(self, state, theta, u):
+        offset = theta[1]
+        return self.delay.observation(state, theta[:1], u) + offset
+    
 class DelaySystem(ODESystem):
     def __init__(self, order=1):
         self.order = order

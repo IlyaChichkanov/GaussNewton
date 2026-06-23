@@ -15,7 +15,8 @@ from commom_utils.ode_system import ODESystem
 
 
 class MheModel(ABC):
-    def __init__(self, system: ODESystem):
+    def __init__(self, system: ODESystem, use_noise: bool):
+        self.use_noise = use_noise
         self.system = system
         self.state_length = system.nx
         self.input_length = system.nu
@@ -24,7 +25,8 @@ class MheModel(ABC):
 
     def continuous_dynamics(self, state, params, noise, input_signals) -> SX:
         dstate = self.system.get_derivative(state, params, input_signals)
-        dstate += noise
+        if(self.use_noise):
+            dstate += noise
         dx = vertcat(dstate, SX(np.zeros(self.param_length)))
         return dx
 
@@ -48,7 +50,8 @@ class MheModel(ABC):
         acados_model.f_impl_expr = xdot - dx
         acados_model.f_expl_expr = dx
         acados_model.x = vertcat(x, parameters)
-        acados_model.u = w_noise
+        if(self.use_noise):
+            acados_model.u = w_noise
         acados_model.param_length = self.param_length
         acados_model.state_length = self.state_length
         acados_model.p = p
@@ -166,11 +169,11 @@ class MheModel(ABC):
 
         return np.array(F_num).reshape((n_theta, n_theta))
     
-    def compute_augmented_fim(self, n_meas, dt, input_signals_data, x0, theta, r_inv):
+    def compute_augmented_fim(self, dt, input_signals_data, x0, theta, r_inv):
         nx = self.state_length
         n_theta = self.param_length
         n_obs = self.obs_length
-        N = n_meas
+        N = input_signals_data.shape[0]
 
         input_sym = ca.SX.sym('input', N, self.input_length)
         x0_sym = ca.SX.sym('x0', nx)
@@ -223,7 +226,7 @@ class MheCogeGenerator(ABC):
         self.params = params
         self.generated_folder = generated_folder
         self.model_name = model_name
-        self.mhe_model = MheModel(mhe_model)
+        self.mhe_model = MheModel(mhe_model, params.use_noise)
         state_length = self.mhe_model.state_length
         param_length = self.mhe_model.param_length
         obs_length = self.mhe_model.obs_length

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from acados_template import AcadosOcp
 from commom_utils.ode_system import check_system_ok, MHESyntheticDataGenerator
-from commom_utils.systems import KinematicModel, DelaySystem  # add other systems as needed
+from commom_utils.systems import KinematicModel, DelayOffset  # add other systems as needed
 from commom_utils.system_config import create_system, create_mhe_params
 from mhe.mhe_base_model_interface import MheCogeGenerator
 from mhe.params import MheParams
@@ -33,34 +33,34 @@ def harmonic(t):
 
 SYSTEM_CONFIGS = {
     "DelaySystem": {
-        "class": DelaySystem,
+        "class": DelayOffset,
         "args": [2],
         "c0": np.array([0.0, 0.0]),
-        "theta_true": np.array([0.4]),
-        "delta_theta": np.array([0.2]),
+        "theta_true": np.array([0.4, 0.2]),
+        "delta_theta": np.array([0.2, -0.2]),
         "input_signal": lambda t: harmonic(t),         #
         #"observation": lambda state, theta, u: state,  # по умолчанию весь state
         "get_initial_state": lambda y_meas, u, theta: np.hstack((u, 0)),
         "sigma_noise" :np.array([0.01])
     },
 
-    "KinematicBycicle": {
-        "class": KinematicModel,                     # модель из MHE (возможно, упрощённая)
-        "args": [2.65, True],                                # wheelbase
-        "c0": np.array([0.0]),                         # одномерное состояние? Уточните
-        "theta_true": np.array([0.05, np.deg2rad(0.5)]),
-        "delta_theta": np.array([0.01, np.deg2rad(1.0)]),
-        "input_signal": get_input_signals_bycicle,
-        "get_initial_state": lambda y_meas, u, theta: y_meas[0:1],
-        "sigma_noise" :np.array([0.01, 0.01])
-    },
+    # "KinematicBycicle": {
+    #     "class": KinematicModel,                     # модель из MHE (возможно, упрощённая)
+    #     "args": [2.65, True],                                # wheelbase
+    #     "c0": np.array([0.0]),                         # одномерное состояние? Уточните
+    #     "theta_true": np.array([0.05, np.deg2rad(0.5)]),
+    #     "delta_theta": np.array([0.01, np.deg2rad(1.0)]),
+    #     "input_signal": get_input_signals_bycicle,
+    #     "get_initial_state": lambda y_meas, u, theta: y_meas[0:1],
+    #     "sigma_noise" :np.array([0.01, 0.01])
+    # },
 
 }
 
 
 MHE_CONFIGS = {
     "KinematicBycicle": {
-        "measurements_residual_r": np.diag([0.000001, 1.0]),
+        "measurements_residual_r": np.diag([1.0, 1.0]),
         "state_prior_q0": np.diag([1.0]),
         "noise_peanlty_w": np.eye(1) * 1e3,
         "fim_scaler": 1.0,
@@ -75,7 +75,7 @@ MHE_CONFIGS = {
         "fim_scaler": 1.0,
         "bounds_noise": [[-0.1, 0.1]] * 2,
         "bounds_state": [[-1e5, 1e5]] * 2,
-        "bounds_param": [[0, 0.7]],
+        "bounds_param": [[0, 0.7], [-10, 10]],
     },
 
 }
@@ -114,7 +114,7 @@ def create_mhe_params(mhe_cfg: dict, dt: float, mhe_horizont: int):
         bounds_state=mhe_cfg["bounds_state"],
         bounds_param=mhe_cfg["bounds_param"],
         fim_scaler=mhe_cfg["fim_scaler"],
-        use_noise = 1
+        use_noise = 0
     )
 
 
@@ -158,8 +158,8 @@ def test_mhe_identification(system_config, tmp_path):
     t0 = 0.0
     T_f = mhe_params.dt * mhe_params.mhe_horizont
     N_meas = mhe_params.mhe_horizont
-    overlap_points = int(N_meas * 0.9)
-    num_windows = 80
+    overlap_points =int(N_meas * 0.5)
+    num_windows = 30
 
     t_windows, u_windows, meas_windows, _ = data_gen.generate_sliding_windows_exact(
         c0=c0,
@@ -210,7 +210,6 @@ def test_mhe_identification(system_config, tmp_path):
         Q_state_diag=1e-6,                         # шум процесса (состояния)
         initial_Sigma=initial_Sigma,               # начальная ковариация
         ridge_reg=1e-6,                            # регуляризация FIM
-        plot=False                                 # не показывать графики в цикле
     )
     final_theta_est = results[-1].param_est
     rel_error = np.abs((final_theta_est - theta_true) / theta_true)
