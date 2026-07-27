@@ -8,7 +8,7 @@ def get_input_signals_bycicle(t):
     v = 10.0
     if(t < 10):
         steering = 0
-    return [v, steering]          # порядок: steering, vx (как ожидает LateralCarDynamic)
+    return [v, steering, 2.65]          # порядок: steering, vx (как ожидает LateralCarDynamic)
 
 def harmonic(t):
     return [jnp.cos(0.3 * t) * jnp.sin(0.1 * t + np.pi / 2)]
@@ -74,10 +74,10 @@ SYSTEM_CONFIGS = {
     },
     "KinematicBycicle": {
         "class": KinematicModel,                     # модель из MHE (возможно, упрощённая)
-        "args": [2.65, True],                                # wheelbase
+        "args": [True],                                # wheelbase
         "c0": np.array([0.0]),                         # одномерное состояние? Уточните
-        "theta_true": np.array([0.05, np.deg2rad(-1.0)]),
-        "delta_theta": np.array([0.01, np.deg2rad(2.0)]),
+        "theta_true": np.array([0.05, np.deg2rad(-0.1)]),
+        "delta_theta": np.array([0.04, np.deg2rad(5.0)]),
         "input_signal": get_input_signals_bycicle,
         "get_initial_state": lambda y_meas, u, theta: y_meas[0:1],
     },
@@ -243,6 +243,5 @@ def create_mhe_params(mhe_cfg: dict, dt: float, mhe_horizont: int):
         bounds_noise=mhe_cfg["bounds_noise"],
         bounds_state=mhe_cfg["bounds_state"],
         bounds_param=mhe_cfg["bounds_param"],
-        fim_scaler=mhe_cfg["fim_scaler"],
         use_noise=0
     )

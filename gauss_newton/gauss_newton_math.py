@@ -66,9 +66,10 @@ class MultipleShooting:
                     c0_ = np.zeros(n_state)
                 elif c0_init_method == 'measurement_pad':
                     c0_ = np.zeros(n_state)
-                    c0_[:len(y_first)] = y_first
+                    c0_[:n_state] = y_first[:n_state]
                 elif c0_init_method == 'inverse_h':
                     x0_guess = np.zeros(n_state) if c0_guess is None or np.any(np.isnan(c0_guess)) else c0_guess
+                    
                     c0_ = self.system.inverse_h(y_first, t_first, theta0, 
                                                 x_guess=x0_guess, n_iter=n_iter)
                 else:

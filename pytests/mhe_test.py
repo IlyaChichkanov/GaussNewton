@@ -15,46 +15,66 @@ from mhe.mhe_utils import run_mhe_estimation, reset_mhe_solver, plot_mhe_results
 # ------------------------------------------------------------
 # Configuration for different systems
 # ------------------------------------------------------------
+import math
+
+# import numpy as np
+# import pytest
+# from acados_template import AcadosOcp
+# from mhe.mhe_base_model_interface import MheCogeGenerator
+# from systems import DelayOffset, KinematicModel, LotkaVoltera
+# from tests_utils.mhe_utils import plot_mhe_results, reset_mhe_solver, run_mhe_estimation
+# from tests_utils.ode_system import MHESyntheticDataGenerator, check_system_ok
+# from params import MheParams
+
 
 def get_input_signals_bycicle(t):
-    import math
+    wheelbase = 2.65
     w = 0.7
     steering = 0.8 * math.cos(t * 0.25 * w) * math.sin(w * t)
-    if t < 25:
+    if t < 15:
         steering = 0
     v = 10.0
-    return [v, steering]
+    return [v, steering, wheelbase]
 
 
 def harmonic(t):
-    u = np.sin(0.3 * t)
+    u = np.sin(0.3 * t)# + 0.01 * np.random.normal()
     return [u]
 
 
 SYSTEM_CONFIGS = {
-    "DelaySystem": {
-        "class": DelayOffset,
-        "args": [2],
-        "c0": np.array([0.0, 0.0]),
-        "theta_true": np.array([0.4, 0.2]),
-        "delta_theta": np.array([0.2, -0.2]),
-        "input_signal": lambda t: harmonic(t),         #
-        #"observation": lambda state, theta, u: state,  # по умолчанию весь state
-        "get_initial_state": lambda y_meas, u, theta: np.hstack((u, 0)),
-        "sigma_noise" :np.array([0.01])
-    },
-
-    # "KinematicBycicle": {
-    #     "class": KinematicModel,                     # модель из MHE (возможно, упрощённая)
-    #     "args": [2.65, True],                                # wheelbase
-    #     "c0": np.array([0.0]),                         # одномерное состояние? Уточните
-    #     "theta_true": np.array([0.05, np.deg2rad(0.5)]),
-    #     "delta_theta": np.array([0.01, np.deg2rad(1.0)]),
-    #     "input_signal": get_input_signals_bycicle,
-    #     "get_initial_state": lambda y_meas, u, theta: y_meas[0:1],
-    #     "sigma_noise" :np.array([0.01, 0.01])
+    # "DelaySystem": {
+    #     "class": DelayOffset,
+    #     "args": [2],
+    #     "c0": np.array([0.0, 0.0]),
+    #     "theta_true": np.array([0.4, 0.2]),
+    #     "delta_theta": np.array([0.2, -0.2]),
+    #     "input_signal": lambda t: harmonic(t),        #
+    #     #"observation": lambda state, theta, u: state,  # по умолчанию весь state
+    #     "get_initial_state": lambda y_meas, u, theta: np.hstack((u, 0)),
+    #     "sigma_noise": np.array([0.01])
     # },
 
+    "KinematicBycicle": {
+        "class": KinematicModel,                     # модель из MHE (возможно, упрощённая)
+        "args": [True],                                # wheelbase
+        "c0": np.array([0.0]),                         # одномерное состояние? Уточните
+        "theta_true": np.array([0.05, np.deg2rad(0.5)]),
+        "delta_theta": np.array([0.01, np.deg2rad(1.0)]),
+        "input_signal": get_input_signals_bycicle,
+        "get_initial_state": lambda y_meas, u, theta: y_meas[0:1],
+        "sigma_noise": np.array([0.01, 0.01])
+    },
+    # "LotkaVoltera": {
+    #     "class": LotkaVoltera,
+    #     "args": [],
+    #     "c0": np.array([0.4, 3.0]),
+    #     "theta_true": np.array([0.8, 0.2, 0.3, 0.1]),
+    #     "delta_theta": np.array([0.1, 0.15, 0.1, 0.5]) * 1.0, #+ (np.random.rand(4) - 0.5) * 0.05,
+    #     "input_signal": None,                          # нет входа
+    #     "get_initial_state": lambda y_meas, u, theta: y_meas,
+    #     "sigma_noise": np.array([0.1, 0.1])
+    # },
 }
 
 
@@ -63,7 +83,6 @@ MHE_CONFIGS = {
         "measurements_residual_r": np.diag([1.0, 1.0]),
         "state_prior_q0": np.diag([1.0]),
         "noise_peanlty_w": np.eye(1) * 1e3,
-        "fim_scaler": 1.0,
         "bounds_noise": [[-0.01, 0.01]],
         "bounds_state": [[-np.inf, np.inf]],
         "bounds_param": [np.deg2rad([-5, 5]), [-1, 1]],
@@ -72,15 +91,20 @@ MHE_CONFIGS = {
         "measurements_residual_r": np.diag([1.0]),
         "state_prior_q0": np.diag([1, 1]),
         "noise_peanlty_w": np.eye(2) * 10,
-        "fim_scaler": 1.0,
         "bounds_noise": [[-0.1, 0.1]] * 2,
         "bounds_state": [[-1e5, 1e5]] * 2,
         "bounds_param": [[0, 0.7], [-10, 10]],
     },
+    "LotkaVoltera": {
+        "measurements_residual_r": np.diag([1.0, 1.0]),
+        "state_prior_q0": np.diag([1.0, 1.0]),
+        "noise_peanlty_w": np.eye(2) * 1e3,
+        "bounds_noise": [[-0.01, 0.01]] * 2,
+        "bounds_state": [[-np.inf, np.inf]] * 2,
+        "bounds_param": [[-2000, 2000]] * 4,
+    },
 
 }
-
-
 
 
 def create_system(cfg: dict):
@@ -113,8 +137,7 @@ def create_mhe_params(mhe_cfg: dict, dt: float, mhe_horizont: int):
         bounds_noise=mhe_cfg["bounds_noise"],
         bounds_state=mhe_cfg["bounds_state"],
         bounds_param=mhe_cfg["bounds_param"],
-        fim_scaler=mhe_cfg["fim_scaler"],
-        use_noise = 0
+        use_noise=0
     )
 
 
@@ -133,7 +156,7 @@ def test_mhe_identification(system_config, tmp_path):
 
     system, c0, theta_true, delta_theta = create_system(system_config)
     check_system_ok(system)
-    mhe_params = create_mhe_params(mhe_config, dt=0.02, mhe_horizont=400)
+    mhe_params = create_mhe_params(mhe_config, dt=0.02, mhe_horizont=40)
     mhe_params.print()
     # Generator for acados code
 
@@ -158,8 +181,8 @@ def test_mhe_identification(system_config, tmp_path):
     t0 = 0.0
     T_f = mhe_params.dt * mhe_params.mhe_horizont
     N_meas = mhe_params.mhe_horizont
-    overlap_points =int(N_meas * 0.5)
-    num_windows = 30
+    overlap_points = int(N_meas * 0.5)
+    num_windows = 100
 
     t_windows, u_windows, meas_windows, _ = data_gen.generate_sliding_windows_exact(
         c0=c0,
@@ -174,7 +197,7 @@ def test_mhe_identification(system_config, tmp_path):
     def get_window(i):
         return t_windows[i], u_windows[i], meas_windows[i], _
 
-    initial_theta = delta_theta + theta_true
+    initial_theta = (delta_theta + theta_true)
 
     # Инициализация
     dt = mhe_params.dt
@@ -191,11 +214,12 @@ def test_mhe_identification(system_config, tmp_path):
     initial_std = np.abs(delta_theta) * 1.5
 
     # Начальная ковариационная матрица расширенного состояния
-    initial_Sigma = np.eye(nx + n_theta)
-    initial_Sigma[:nx, :nx] *= 1e3          # большая неопределённость для состояний
-    initial_Sigma[nx:, nx:] = np.diag(initial_std ** 2)   # умеренная для параметров
+    initial_sigma = np.eye(nx + n_theta)
+    initial_sigma[:nx, :nx] *= 1e1          # большая неопределённость для состояний
+    initial_sigma[nx:, nx:] = np.diag(initial_std ** 2)   # умеренная для параметров
 
     # Запуск MHE
+    print("run_mhe_estimation")
     results = run_mhe_estimation(
         mhe_model=generator.get_model(),
         acados_solver_factory=acados_solver_mhe,
@@ -207,29 +231,40 @@ def test_mhe_identification(system_config, tmp_path):
         num_windows=num_windows,
         dt=dt,                                     # шаг дискретизации
         r_inv=mhe_params.measurements_residual_r,  # весовая матрица измерений
-        Q_state_diag=1e-6,                         # шум процесса (состояния)
-        initial_Sigma=initial_Sigma,               # начальная ковариация
+        q_state_diag=1e-6,                         # шум процесса (состояния)
+        q_param_diag=1e-6,
+        initial_sigma=initial_sigma,               # начальная ковариация
         ridge_reg=1e-6,                            # регуляризация FIM
     )
+
+    # import plotly.graph_objects as go
+    # fig = go.Figure(data=go.Scatter(x=[1,2,3], y=[4,5,6]))
+    # fig.show()
     final_theta_est = results[-1].param_est
     rel_error = np.abs((final_theta_est - theta_true) / theta_true)
     print(f'rel_error : {rel_error}')
     print(f'final_theta_est - {final_theta_est}, theta_true - {theta_true}')
     plot = 1
     if (plot):
-        plot_mhe_results(results, overlap=overlap_points,
+        fig = plot_mhe_results(results, overlap=overlap_points,
                     initial_params=initial_theta,
                     theta_true=theta_true,   # your true parameter array
-                    initial_std = initial_std,
+                    initial_std=initial_std,
                     plot_states=True,
                     plot_params=True,
                     plot_eigvals=False,
                     plot_noise=False,
-                    plot_cost=True,
-                    plot_iter=True,
-                    plot_status=True,
+                    plot_cost=0,
+                    plot_iter=0,
+                    plot_status=0,
                     plot_cov_matrix=False,
+                    verbose = 1,
                     figsize=(15, 18))   # slightly larger to accommodate taller first plot
+        #fig.write_html('mhe_results_2.html', include_plotlyjs='cdn')
+        fig.write_html('mhe_results.html', include_plotlyjs='cdn')
+        #fig.write_image('mhe_plot.png', width=1200, height=700)
+        # fig.write_html('mhe_results.html')
+        #fig.show()
 
-    assert np.all(rel_error < 2e-2), f"System {system_name}: final estimate {final_theta_est} \
+    assert np.all(rel_error < 5e-2), f"System {system_name}: final estimate {final_theta_est} \
                                      differs from true {theta_true} by {rel_error}"

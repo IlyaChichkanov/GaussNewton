@@ -13,7 +13,6 @@ class MheParams:
     bounds_param: np.ndarray
     bounds_state: np.ndarray
     bounds_noise: np.ndarray
-    fim_scaler: float
     use_noise: bool
 
     def __post_init__(self):

@@ -193,6 +193,31 @@ class SystemJacobian:
         inp = self._get_inp_signals(t)
         return np.array(self.res_h(*state, *inp, *theta)).flatten()
 
+    # def inverse_h(self, y, t, theta, x_guess=None, n_iter=1):
+    #     """
+    #     Приближённо решает уравнение h(x, theta) = y относительно x.
+    #     Параметры:
+    #         y: измерение (meas_len,)
+    #         t: время
+    #         theta: параметры (theta_len,)
+    #         x_guess: начальное приближение (state_len,). Если None, то нули.
+    #         n_iter: число итераций Гаусса–Ньютона (обычно 1-2).
+    #     Возвращает:
+    #         x: оценка состояния (state_len,)
+    #     """
+    #     if x_guess is None:
+    #         x_guess = np.zeros(self.nx)
+        
+    #     x = x_guess.copy()
+    #     for _ in range(n_iter):
+    #         dh_dx = self.dh_dx(x, t, theta)        # (meas_len, state_len)
+    #         h_val = self.h_x(x, t, theta)          # (meas_len,)
+    #         residual = y - h_val
+    #         # Решаем линейную систему (least squares)
+    #         delta_x = np.linalg.lstsq(dh_dx, residual, rcond=None)[0]
+    #         x = x + delta_x
+    #     return x
+    
     def inverse_h(self, y, t, theta, x_guess=None, n_iter=1):
         """
         Приближённо решает уравнение h(x, theta) = y относительно x.
@@ -207,17 +232,23 @@ class SystemJacobian:
         """
         if x_guess is None:
             x_guess = np.zeros(self.nx)
-        
         x = x_guess.copy()
         for _ in range(n_iter):
-            dh_dx = self.dh_dx(x, t, theta)        # (meas_len, state_len)
-            h_val = self.h_x(x, t, theta)          # (meas_len,)
+            dh_dx = self.dh_dx(x, t, theta)
+            h_val = self.h_x(x, t, theta)
             residual = y - h_val
-            # Решаем линейную систему (least squares)
-            delta_x = np.linalg.lstsq(dh_dx, residual, rcond=None)[0]
+            # Проверка на некорректные значения
+            if np.any(np.isnan(dh_dx)) or np.any(np.isnan(residual)):
+                raise ValueError("NaN encountered in inverse_h iteration")
+            # Используем псевдообращение с автоматическим выбором порога
+            try:
+                delta_x = np.linalg.lstsq(dh_dx, residual, rcond=None)[0]
+            except np.linalg.LinAlgError:
+                # Fallback на псевдообращение через pinv с явным rcond
+                delta_x = np.linalg.pinv(dh_dx, rcond=1e-6) @ residual
             x = x + delta_x
         return x
-
+    
     def f_x_theta(self, state, t, theta):
         """Вычисляет правую часть системы в момент t."""
         inp = self._get_inp_signals(t)
