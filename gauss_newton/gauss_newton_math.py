@@ -1,7 +1,7 @@
 import numpy as np
 from commom_utils.ode_system import ODESystem, SystemJacobian
 from scipy.sparse import block_diag, lil_matrix, csr_matrix, vstack, hstack, eye as speye, diags
-from scipy.sparse.linalg import spsolve
+from scipy.sparse.linalg import spsolve, splu
 from scipy.sparse import diags as spdiags
 from scipy import stats  
 
@@ -50,15 +50,12 @@ class MultipleShooting:
     def make_full_theta(self, theta0, c0_guess = None, c0_init_method='inverse_h', n_iter=1):
         theta_full = np.copy(theta0)
         n_state = self.system.nx
-        
-        for state_measured, t_meas in zip(self.state_measured_batches, self.t_eval_measurements_batches):
-            n_meas = len(t_meas)
-            meas_idx = np.arange(n_meas, dtype=int)
-            shoot_idx = meas_idx[0:-1:int(len(meas_idx) / self.N_shoot)]
-            shoot_idx = np.append(shoot_idx, meas_idx[-1])
-            
-            for i in range(len(shoot_idx) - 1):
-                idx = shoot_idx[i]
+
+        for state_measured, t_meas, tm in zip(self.state_measured_batches,
+                                              self.t_eval_measurements_batches,
+                                              self.interval_managers):
+            for shoot in range(tm.N_shoot):
+                idx = tm.shoot_indexes[shoot]
                 y_first = state_measured[idx]
                 t_first = t_meas[idx]
                 
@@ -166,6 +163,10 @@ class MultipleShooting:
         total_meas_points = sum(len(meas_idx) for _, meas_idx in intervals)
         n_params = n_theta + n_shoot * n_state
 
+        # Смещение c-блока данного батча в theta_full: по фактическому числу
+        # шутов предыдущих батчей (оно может отличаться от запрошенного N_shoot)
+        c_offset = n_theta + sum(im.N_shoot for im in self.interval_managers[:batch_idx]) * n_state
+
         J = lil_matrix((total_meas_points * n_meas, n_params))
         R = np.zeros(total_meas_points * n_meas)
         J_G = lil_matrix(((n_shoot - 1) * n_state, n_params))
@@ -178,7 +179,7 @@ class MultipleShooting:
         state_prev = None
 
         for shoot, (t_interval, meas_idx) in enumerate(intervals):
-            start_idx = n_theta + n_shoot * batch_idx * n_state + shoot * n_state
+            start_idx = c_offset + shoot * n_state
             c0 = theta_full[start_idx: start_idx + n_state]
 
             if self.use_jax:
@@ -219,9 +220,9 @@ class MultipleShooting:
                 if self.gamma is not None:
                     R[row_start:row_end] *= self.gamma
                     J[row_start:row_end, :] = spdiags(self.gamma, 0, shape=(n_meas, n_meas)) @ J[row_start:row_end, :]
-                    if i == 0:   # первая точка интервала
-                        R[row_start:row_end] *= self.c0_cost
-                        J[row_start:row_end, :] *= self.c0_cost
+                if i == 0:   # первая точка интервала
+                    R[row_start:row_end] *= self.c0_cost
+                    J[row_start:row_end, :] *= self.c0_cost
 
                 meas_row += 1
 
@@ -246,22 +247,37 @@ class MultipleShooting:
         return J, J_G, R, R_G
 
 
-def compute_parameter_covariance_measurements_only(J, R, n_theta):
-    # J – полный якобиан измерений (n_meas × n_params_full)
-    # Берём только первые n_theta столбцов (θ)
-    J_theta = J[:, :n_theta]
-    n_meas = J.shape[0]
-    # Оценка дисперсии шума по измерительным невязкам
-    residual_sum_squares = np.dot(R, R)
-    dof = max(n_meas - n_theta, 1)
+def compute_parameter_covariance(J, R, J_G, R_G, n_theta):
+    """Маргинальная ковариация θ по полной системе невязок.
+
+    Согласно теории (theory_gauss_newton.ipynb): J_full = [J_meas; J_cont],
+    R_full = [R_meas; R_cont], Cov(p) = σ² (J_fullᵀ J_full)⁻¹, dof = n_rows − n_params.
+    Возвращается θ-блок обратной матрицы (Шур-комплемент по блоку начальных
+    состояний), т.е. корреляция θ с c_j учитывается, а не отбрасывается.
+    """
+    if J_G is not None and J_G.shape[0] > 0:
+        J_full = vstack([J, J_G], format='csr')
+        R_full = np.concatenate([R, R_G])
+    else:
+        J_full = J.tocsr()
+        R_full = R
+
+    n_rows, n_params = J_full.shape
+    residual_sum_squares = float(R_full @ R_full)
+    dof = max(n_rows - n_params, 1)
     sigma2 = residual_sum_squares / dof
-    H = J_theta.T @ J_theta
-    H_reg = H + 1e-8 * np.eye(n_theta)
+
+    H_reg = (J_full.T @ J_full + 1e-8 * speye(n_params)).tocsc()
+    # θ-блок обратной матрицы: решаем H X = E_θ вместо явного обращения
+    rhs = np.zeros((n_params, n_theta))
+    rhs[:n_theta, :] = np.eye(n_theta)
     try:
-        cov_theta = sigma2 * np.linalg.inv(H_reg.toarray() if hasattr(H_reg, 'toarray') else H_reg)
-    except np.linalg.LinAlgError:
-        cov_theta = sigma2 * np.linalg.pinv(H_reg.toarray() if hasattr(H_reg, 'toarray') else H_reg)
-    return cov_theta, sigma2
+        solve = splu(H_reg).solve
+        X = solve(rhs)
+    except RuntimeError:
+        X = np.linalg.pinv(H_reg.toarray()) @ rhs
+    cov_theta = sigma2 * X[:n_theta, :]
+    return cov_theta, sigma2, dof
 
 def confidence_intervals(theta_opt, cov, dof, alpha=0.05):
     se = np.sqrt(np.diag(cov))
@@ -311,18 +327,16 @@ def run_optimization(problem, config, theta_full, system):
     best_cost = np.sum(R**2) + np.sum(R_G**2)  # полная стоимость
     print(f'  J nnz: {J.nnz}, J_G nnz: {J_G.nnz}')
     for it in range(config.n_iter):
-        start = time.time()
+        iter_start = time.time()
 
         # Логирование текущей стоимости
         meas_cost = np.sum(R**2) / max(1, len(R))
         cont_cost = np.sum(R_G**2) / max(1, len(R_G)) if R_G.size > 0 else 0.0
-        print(f'Iter {it:3d} | time: {time.time()-start:.3f}s | '
-              f'R_meas: {meas_cost:.3e} | R_cont: {cont_cost:.3e} | mu: {mu:.2e}')
+        print(f'Iter {it:3d} | R_meas: {meas_cost:.3e} | R_cont: {cont_cost:.3e} | mu: {mu:.2e}')
 
         # Ковариация и доверительные интервалы (на текущих J, R)
-        cov_theta, _ = compute_parameter_covariance_measurements_only(J, R, n_theta)
-        dof_meas = max(1, J.shape[0] - n_theta)
-        ci_low_theta, ci_high_theta = confidence_intervals(theta_full[:n_theta], cov_theta, dof_meas, alpha=0.05)
+        cov_theta, _, dof = compute_parameter_covariance(J, R, J_G, R_G, n_theta)
+        ci_low_theta, ci_high_theta = confidence_intervals(theta_full[:n_theta], cov_theta, dof, alpha=0.05)
         ci_low_hist.append(ci_low_theta)
         ci_high_hist.append(ci_high_theta)
 
@@ -344,7 +358,7 @@ def run_optimization(problem, config, theta_full, system):
         trial_cost = np.sum(R_trial**2) + np.sum(R_G_trial**2)
 
         # Принимаем шаг только если стоимость уменьшилась (или не изменилась)
-        if not np.isnan(trial_cost) and trial_cost <= 20*best_cost:
+        if not np.isnan(trial_cost) and trial_cost <= best_cost:
             # Успех: применяем новые параметры и обновляем mu (но не ниже mu_min)
             theta_full = theta_trial
             best_cost = trial_cost
@@ -358,10 +372,8 @@ def run_optimization(problem, config, theta_full, system):
             consecutive_failures += 1
             mu = max(mu /config.mu_dec, mu_min)
             if consecutive_failures >= 3:
+                print(f"  Остановка после {consecutive_failures} неудачных шагов подряд")
                 break
-                mu = max(mu *config.mu_dec, mu_min)
-                print(f"  Принудительно уменьшаем mu до {mu:.2e} из-за {consecutive_failures} неудач")
-                consecutive_failures = 0
         # Сохраняем историю (текущие theta_full и невязки)
         theta_hist.append(theta_full.copy())
         r_meas_hist.append(meas_cost)
@@ -372,7 +384,7 @@ def run_optimization(problem, config, theta_full, system):
             print("mu достиг нижней границы, улучшений нет – остановка.")
             break
 
-        elapsed = time.time() - start
+        print(f'  Iter time: {time.time() - iter_start:.3f}s')
 
     ci_low_hist = np.array(ci_low_hist)
     ci_high_hist = np.array(ci_high_hist)

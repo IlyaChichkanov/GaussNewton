@@ -510,11 +510,12 @@ def plot_solution(
                         ),
                         row=base_row + obs_idx, col=batch_idx + 1
                     )
-        tm = TimeIntervalManager(problem.N_shoot, t_meas)
+        tm = problem.interval_managers[batch_idx]
         n_shoot = tm.N_shoot
+        c_offset = n_theta + sum(im.N_shoot for im in problem.interval_managers[:batch_idx]) * n_state
 
         for shoot in range(n_shoot):
-            start_idx = n_theta + problem.N_shoot * batch_idx * n_state + shoot * n_state
+            start_idx = c_offset + shoot * n_state
             c0 = theta_full[start_idx:start_idx + n_state]
 
             t_interval, _ = tm.get_time_interval(shoot)
