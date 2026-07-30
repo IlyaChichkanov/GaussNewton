@@ -2,29 +2,18 @@ import sys
 from pathlib import Path
 repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root))
+import math
+import plotly.io as pio
 import numpy as np
 import pytest
 from acados_template import AcadosOcp
 from commom_utils.ode_system import check_system_ok, MHESyntheticDataGenerator
-from commom_utils.systems import KinematicModel, DelayOffset  # add other systems as needed
+from commom_utils.systems import KinematicModel, DelayOffset, LotkaVoltera  # add other systems as needed
 from commom_utils.system_config import create_system, create_mhe_params
 from mhe.mhe_base_model_interface import MheCogeGenerator
 from mhe.params import MheParams
-from mhe.mhe_utils import run_mhe_estimation, reset_mhe_solver, plot_mhe_results
+from mhe.mhe_utils import run_mhe_estimation, reset_mhe_solver, plot_mhe_slider_lines
 
-# ------------------------------------------------------------
-# Configuration for different systems
-# ------------------------------------------------------------
-import math
-
-# import numpy as np
-# import pytest
-# from acados_template import AcadosOcp
-# from mhe.mhe_base_model_interface import MheCogeGenerator
-# from systems import DelayOffset, KinematicModel, LotkaVoltera
-# from tests_utils.mhe_utils import plot_mhe_results, reset_mhe_solver, run_mhe_estimation
-# from tests_utils.ode_system import MHESyntheticDataGenerator, check_system_ok
-# from params import MheParams
 
 
 def get_input_signals_bycicle(t):
@@ -43,17 +32,17 @@ def harmonic(t):
 
 
 SYSTEM_CONFIGS = {
-    # "DelaySystem": {
-    #     "class": DelayOffset,
-    #     "args": [2],
-    #     "c0": np.array([0.0, 0.0]),
-    #     "theta_true": np.array([0.4, 0.2]),
-    #     "delta_theta": np.array([0.2, -0.2]),
-    #     "input_signal": lambda t: harmonic(t),        #
-    #     #"observation": lambda state, theta, u: state,  # по умолчанию весь state
-    #     "get_initial_state": lambda y_meas, u, theta: np.hstack((u, 0)),
-    #     "sigma_noise": np.array([0.01])
-    # },
+    "DelaySystem": {
+        "class": DelayOffset,
+        "args": [2],
+        "c0": np.array([0.0, 0.0]),
+        "theta_true": np.array([0.4, 0.2]),
+        "delta_theta": np.array([0.2, -0.2]),
+        "input_signal": lambda t: harmonic(t),        #
+        #"observation": lambda state, theta, u: state,  # по умолчанию весь state
+        "get_initial_state": lambda y_meas, u, theta: np.hstack((u, 0)),
+        "sigma_noise": np.array([0.01])
+    },
 
     "KinematicBycicle": {
         "class": KinematicModel,                     # модель из MHE (возможно, упрощённая)
@@ -65,16 +54,16 @@ SYSTEM_CONFIGS = {
         "get_initial_state": lambda y_meas, u, theta: y_meas[0:1],
         "sigma_noise": np.array([0.01, 0.01])
     },
-    # "LotkaVoltera": {
-    #     "class": LotkaVoltera,
-    #     "args": [],
-    #     "c0": np.array([0.4, 3.0]),
-    #     "theta_true": np.array([0.8, 0.2, 0.3, 0.1]),
-    #     "delta_theta": np.array([0.1, 0.15, 0.1, 0.5]) * 1.0, #+ (np.random.rand(4) - 0.5) * 0.05,
-    #     "input_signal": None,                          # нет входа
-    #     "get_initial_state": lambda y_meas, u, theta: y_meas,
-    #     "sigma_noise": np.array([0.1, 0.1])
-    # },
+    "LotkaVoltera": {
+        "class": LotkaVoltera,
+        "args": [],
+        "c0": np.array([0.4, 3.0]),
+        "theta_true": np.array([0.8, 0.2, 0.3, 0.1]),
+        "delta_theta": np.array([0.1, 0.15, 0.1, 0.5]) * 1.0, #+ (np.random.rand(4) - 0.5) * 0.05,
+        "input_signal": None,                          # нет входа
+        "get_initial_state": lambda y_meas, u, theta: y_meas,
+        "sigma_noise": np.array([0.1, 0.1])
+    },
 }
 
 
@@ -245,23 +234,23 @@ def test_mhe_identification(system_config, tmp_path):
     print(f'rel_error : {rel_error}')
     print(f'final_theta_est - {final_theta_est}, theta_true - {theta_true}')
     plot = 1
+    pio.renderers.default = 'browser'   # или 'browser'
     if (plot):
-        fig = plot_mhe_results(results, overlap=overlap_points,
-                    initial_params=initial_theta,
-                    theta_true=theta_true,   # your true parameter array
-                    initial_std=initial_std,
-                    plot_states=True,
-                    plot_params=True,
-                    plot_eigvals=False,
-                    plot_noise=False,
-                    plot_cost=0,
-                    plot_iter=0,
-                    plot_status=0,
-                    plot_cov_matrix=False,
-                    verbose = 1,
-                    figsize=(15, 18))   # slightly larger to accommodate taller first plot
+        fig = plot_mhe_slider_lines(
+            results,
+            overlap=overlap_points,
+            initial_params=initial_theta,
+            initial_std=initial_std,
+            theta_true=theta_true,
+            # state_names=['ψ (predicted)'],
+            # meas_names=['ψ (meas)', 'ω (meas)'],
+            # param_names=['GR', 'offset'],
+            fontsize = 18,
+            figsize=(1200, 1000)
+        )
+        fig.show()
         #fig.write_html('mhe_results_2.html', include_plotlyjs='cdn')
-        fig.write_html('mhe_results.html', include_plotlyjs='cdn')
+        #fig.write_html('mhe_results.html', include_plotlyjs='cdn')
         #fig.write_image('mhe_plot.png', width=1200, height=700)
         # fig.write_html('mhe_results.html')
         #fig.show()

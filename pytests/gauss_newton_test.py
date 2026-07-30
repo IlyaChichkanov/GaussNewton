@@ -10,7 +10,7 @@ sys.path.insert(0, str(repo_root))
 from commom_utils.systems import LotkaVoltera, Attractor
 from commom_utils.ode_system import SyntheticDataGenerator, SystemJacobian
 from gauss_newton.gauss_newton_math import MultipleShooting, run_optimization
-
+from gauss_newton.utils import plot_solution
 # Словарь доступных систем с их конфигурациями
 SYSTEMS_CONFIG = {
     "LotkaVolterra": {
@@ -132,6 +132,24 @@ def test_identification(system, true_params, synthetic_data, system_config):
     # Проверка
     assert np.all(rel_error < 0.05), \
         f"Estimation error too high: {rel_error}"
+
+    plot = 0
+    if plot:
+        fig = plot_solution(
+            problem = ms, 
+            theta_hist = theta_hist,
+            plot_xy=1,
+            plot_theta=True,
+            plot_trajectory=0,
+            plot_true_solution=False,
+            plot_residuals=True,
+            plot_measurements = 1,
+            r_meas_hist=r_meas_hist,
+            r_cont_hist=r_cont_hist,
+            index=-1,
+            theta_true=None,
+        )
+        fig.show()
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

@@ -1,6 +1,6 @@
 import numpy as np
 from commom_utils.ode_system import ODESystem, SystemJacobian
-from scipy.sparse import lil_matrix, csr_matrix, vstack, hstack, eye as speye, diags
+from scipy.sparse import block_diag, lil_matrix, csr_matrix, vstack, hstack, eye as speye, diags
 from scipy.sparse.linalg import spsolve
 from scipy.sparse import diags as spdiags
 from scipy import stats  
@@ -79,44 +79,77 @@ class MultipleShooting:
         return theta_full
 
     def _concatenate_jacobians(self, J1, J2):
-        n_state, n_theta, _ = self.system.get_dimentions()
-        n_c1 = J1.shape[1] - n_theta
-        n_c2 = J2.shape[1] - n_theta
+        """Совместимость с прежним поэтапным интерфейсом склейки."""
+        return self._concatenate_jacobian_batches([J1, J2])
 
-        J1_theta = J1[:, :n_theta]
-        J1_c0 = J1[:, n_theta:]
-        J2_theta = J2[:, :n_theta]
-        J2_c0 = J2[:, n_theta:]
+    def _concatenate_jacobian_batches(self, jacobians):
+        """Собирает локальные якобианы батчей за один проход.
 
-        zeros_top = csr_matrix((J1.shape[0], n_c2))
-        zeros_bottom = csr_matrix((J2.shape[0], n_c1))
+        Первые ``n_theta`` столбцов общие для всех батчей, а оставшиеся
+        столбцы начальных состояний независимы. Поэтому итоговая матрица
+        состоит из вертикально склеенного блока параметров и блочно-
+        диагонального блока начальных состояний.
+        """
+        if not jacobians:
+            raise ValueError("At least one batch Jacobian is required")
 
-        top = hstack([J1_theta, J1_c0, zeros_top])
-        bottom = hstack([J2_theta, zeros_bottom, J2_c0])
-        return vstack([top, bottom])
+        _, n_theta, _ = self.system.get_dimentions()
+        theta_blocks = [jacobian[:, :n_theta] for jacobian in jacobians]
+        c0_blocks = [jacobian[:, n_theta:] for jacobian in jacobians]
+
+        theta_block = vstack(theta_blocks, format='csr')
+        c0_block = block_diag(c0_blocks, format='csr')
+        return hstack([theta_block, c0_block], format='csr')
 
     def solve(self, theta_full):
+        import time
 
-        J_total = None
-        J_G_total = None
-        R_total = None
-        R_G_total = None
+        solve_start = time.perf_counter()
+
+        J_batches = []
+        J_G_batches = []
+        R_batches = []
+        R_G_batches = []
 
         for batch, (state_measured, t_meas) in enumerate(
                 zip(self.state_measured_batches, self.t_eval_measurements_batches)):
             print(f"Solve batch {batch}")
+            batch_solve_start = time.perf_counter()
             J_batch, J_G_batch, R_batch, R_G_batch = self._solve_batch(
                 theta_full, state_measured, t_meas, batch
             )
-            if J_total is None:
-                J_total, J_G_total, R_total, R_G_total = J_batch, J_G_batch, R_batch, R_G_batch
-            else:
-                J_total = self._concatenate_jacobians(J_total, J_batch)
-                J_G_total = self._concatenate_jacobians(J_G_total, J_G_batch)
-                R_total = np.hstack((R_total, R_batch))
-                R_G_total = np.hstack((R_G_total, R_G_batch))
+            batch_solve_elapsed = time.perf_counter() - batch_solve_start
 
-        print(f'J_G_total shape: {J_G_total.shape}, R_G_total len: {len(R_G_total)}')
+            J_batches.append(J_batch)
+            J_G_batches.append(J_G_batch)
+            R_batches.append(R_batch)
+            R_G_batches.append(R_G_batch)
+            print(f'  Timing | batch calculation: {batch_solve_elapsed:.3f}s')
+
+        concatenate_start = time.perf_counter()
+        J_concatenate_start = time.perf_counter()
+        J_total = self._concatenate_jacobian_batches(J_batches)
+        J_concatenate_elapsed = time.perf_counter() - J_concatenate_start
+
+        J_G_concatenate_start = time.perf_counter()
+        J_G_total = self._concatenate_jacobian_batches(J_G_batches)
+        J_G_concatenate_elapsed = time.perf_counter() - J_G_concatenate_start
+
+        residuals_concatenate_start = time.perf_counter()
+        R_total = np.concatenate(R_batches)
+        R_G_total = np.concatenate(R_G_batches)
+        residuals_concatenate_elapsed = time.perf_counter() - residuals_concatenate_start
+        concatenate_elapsed = time.perf_counter() - concatenate_start
+
+        solve_elapsed = time.perf_counter() - solve_start
+        print(
+            f'Concatenation | J: {J_concatenate_elapsed:.3f}s | '
+            f'J_G: {J_G_concatenate_elapsed:.3f}s | '
+            f'residuals: {residuals_concatenate_elapsed:.3f}s | '
+            f'total: {concatenate_elapsed:.3f}s | '
+            f'Solve total: {solve_elapsed:.3f}s | '
+            f'J_G_total shape: {J_G_total.shape}, R_G_total len: {len(R_G_total)}'
+        )
         return J_total, R_total, J_G_total, R_G_total
         
     def _solve_batch(self, theta_full, state_measured, t_meas, batch_idx):
