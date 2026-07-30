@@ -1,9 +1,10 @@
+import time
+
 import numpy as np
 from commom_utils.ode_system import ODESystem, SystemJacobian
-from scipy.sparse import block_diag, lil_matrix, csr_matrix, vstack, hstack, eye as speye, diags
+from scipy.sparse import block_diag, csr_matrix, vstack, hstack, eye as speye, diags
 from scipy.sparse.linalg import spsolve, splu
-from scipy.sparse import diags as spdiags
-from scipy import stats  
+from scipy import stats
 
 class TimeIntervalManager:
     def __init__(self, N_shoot, t_eval_measurements):
@@ -29,12 +30,13 @@ class TimeIntervalManager:
 class MultipleShooting:
 
     def __init__(self, system: ODESystem, N_shoot: int, gamma: np.ndarray = None,
-                 c0_cost: float = 1, use_jax: bool = False):
+                 c0_cost: float = 1, use_jax: bool = False, verbose: bool = False):
         self.system = SystemJacobian(system)
         self.N_shoot = N_shoot
         self.gamma = gamma
         self.c0_cost = c0_cost
         self.use_jax = use_jax
+        self.verbose = verbose
 
         # Data storage
         self.state_measured_batches = []
@@ -99,8 +101,6 @@ class MultipleShooting:
         return hstack([theta_block, c0_block], format='csr')
 
     def solve(self, theta_full):
-        import time
-
         solve_start = time.perf_counter()
 
         J_batches = []
@@ -110,70 +110,54 @@ class MultipleShooting:
 
         for batch, (state_measured, t_meas) in enumerate(
                 zip(self.state_measured_batches, self.t_eval_measurements_batches)):
-            print(f"Solve batch {batch}")
-            batch_solve_start = time.perf_counter()
+            batch_start = time.perf_counter()
             J_batch, J_G_batch, R_batch, R_G_batch = self._solve_batch(
                 theta_full, state_measured, t_meas, batch
             )
-            batch_solve_elapsed = time.perf_counter() - batch_solve_start
+            if self.verbose:
+                print(f'  Batch {batch}: {time.perf_counter() - batch_start:.3f}s')
 
             J_batches.append(J_batch)
             J_G_batches.append(J_G_batch)
             R_batches.append(R_batch)
             R_G_batches.append(R_G_batch)
-            print(f'  Timing | batch calculation: {batch_solve_elapsed:.3f}s')
 
-        concatenate_start = time.perf_counter()
-        J_concatenate_start = time.perf_counter()
         J_total = self._concatenate_jacobian_batches(J_batches)
-        J_concatenate_elapsed = time.perf_counter() - J_concatenate_start
-
-        J_G_concatenate_start = time.perf_counter()
         J_G_total = self._concatenate_jacobian_batches(J_G_batches)
-        J_G_concatenate_elapsed = time.perf_counter() - J_G_concatenate_start
-
-        residuals_concatenate_start = time.perf_counter()
         R_total = np.concatenate(R_batches)
         R_G_total = np.concatenate(R_G_batches)
-        residuals_concatenate_elapsed = time.perf_counter() - residuals_concatenate_start
-        concatenate_elapsed = time.perf_counter() - concatenate_start
 
-        solve_elapsed = time.perf_counter() - solve_start
-        print(
-            f'Concatenation | J: {J_concatenate_elapsed:.3f}s | '
-            f'J_G: {J_G_concatenate_elapsed:.3f}s | '
-            f'residuals: {residuals_concatenate_elapsed:.3f}s | '
-            f'total: {concatenate_elapsed:.3f}s | '
-            f'Solve total: {solve_elapsed:.3f}s | '
-            f'J_G_total shape: {J_G_total.shape}, R_G_total len: {len(R_G_total)}'
-        )
+        if self.verbose:
+            print(f'Solve total: {time.perf_counter() - solve_start:.3f}s | '
+                  f'J: {J_total.shape}, J_G: {J_G_total.shape}')
         return J_total, R_total, J_G_total, R_G_total
-        
+
     def _solve_batch(self, theta_full, state_measured, t_meas, batch_idx):
-        n_state, n_theta, n_meas = self.system.get_dimentions()
-        if self.gamma is not None and len(self.gamma) != n_meas:
-            raise ValueError(f"gamma length must be {n_meas}, got {len(self.gamma)}")
+        n_state, n_theta, n_obs = self.system.get_dimentions()
+        if self.gamma is not None and len(self.gamma) != n_obs:
+            raise ValueError(f"gamma length must be {n_obs}, got {len(self.gamma)}")
         idx_theta = slice(0, n_state * n_theta)
         idx_c = slice(n_state * n_theta, n_state * (n_theta + n_state))
         tm = self.interval_managers[batch_idx]
         n_shoot = tm.N_shoot
-
+        theta = theta_full[:n_theta]
 
         intervals = [tm.get_time_interval(sh) for sh in range(n_shoot)]
-        total_meas_points = sum(len(meas_idx) for _, meas_idx in intervals)
-        n_params = n_theta + n_shoot * n_state
 
         # Смещение c-блока данного батча в theta_full: по фактическому числу
         # шутов предыдущих батчей (оно может отличаться от запрошенного N_shoot)
         c_offset = n_theta + sum(im.N_shoot for im in self.interval_managers[:batch_idx]) * n_state
 
-        J = lil_matrix((total_meas_points * n_meas, n_params))
-        R = np.zeros(total_meas_points * n_meas)
-        J_G = lil_matrix(((n_shoot - 1) * n_state, n_params))
+        # Плотные блоки якобиана: θ-часть общая для всех строк, c-часть
+        # блочно-диагональна по шутам — итоговая J собирается одним hstack.
+        J_theta_rows = []      # (n_obs, n_theta) на каждое измерение
+        J_c_shoot_blocks = []  # вертикальный стек c-блоков каждого шута
+        R_blocks = []
+
+        J_G_theta_blocks = []  # (n_state, n_theta) на каждое ограничение
+        Jc_prev_blocks = []
         R_G = np.zeros((n_shoot - 1) * n_state)
 
-        meas_row = 0  
-        cont_row = 0
         Jx_prev = None
         Jc_prev = None
         state_prev = None
@@ -183,67 +167,62 @@ class MultipleShooting:
             c0 = theta_full[start_idx: start_idx + n_state]
 
             if self.use_jax:
-                sol = self.system.get_jacobian_solution_jax(c0, theta_full[:n_theta], t_interval)
+                sol = self.system.get_jacobian_solution_jax(c0, theta, t_interval)
             else:
-                sol = self.system.get_jacobian_solution(c0, theta_full[:n_theta], t_interval)
+                sol = self.system.get_jacobian_solution(c0, theta, t_interval)
 
             state_traj = sol[:n_state, :]
             J_raw = sol[n_state:, :]
 
-            # Обработка измерений интервала (цикл, как и раньше)
+            J_c_rows = []
             for i, idx in enumerate(meas_idx):
                 state = state_traj[:, i]
                 t = t_interval[i]
 
-                dh_dx = self.system.dh_dx(state, t, theta_full[:n_theta])
-                dh_dtheta = self.system.dh_dtheta(state, t, theta_full[:n_theta])
+                dh_dx = self.system.dh_dx(state, t, theta)
+                dh_dtheta = self.system.dh_dtheta(state, t, theta)
 
                 dx_dtheta = J_raw[idx_theta, i].reshape(n_state, n_theta)
                 dx_dc = J_raw[idx_c, i].reshape(n_state, n_state)
 
-                J_theta = dh_dx @ dx_dtheta + dh_dtheta   # (n_meas, n_theta)
-                J_c = dh_dx @ dx_dc                       # (n_meas, n_state)
+                # Вес строки: gamma по компонентам наблюдения,
+                # c0_cost — дополнительный вес первой точки интервала
+                w = self.gamma if self.gamma is not None else np.ones(n_obs)
+                if i == 0:
+                    w = w * self.c0_cost
 
-                # Строки, соответствующие этому измерению
-                row_start = meas_row * n_meas
-                row_end = row_start + n_meas
+                J_theta_rows.append(w[:, None] * (dh_dx @ dx_dtheta + dh_dtheta))
+                J_c_rows.append(w[:, None] * (dh_dx @ dx_dc))
+                R_blocks.append(w * (state_measured[idx] - self.system.h_x(state, t, theta)))
 
-                # Заполняем блоки в разреженной матрице
-                J[row_start:row_end, :n_theta] = J_theta
-                col_start = n_theta + shoot * n_state
-                J[row_start:row_end, col_start:col_start + n_state] = J_c
-
-                y_meas = state_measured[idx]
-                y_pred = self.system.h_x(state, t, theta_full[:n_theta])
-                R[row_start:row_end] = (y_meas - y_pred)
-
-                if self.gamma is not None:
-                    R[row_start:row_end] *= self.gamma
-                    J[row_start:row_end, :] = spdiags(self.gamma, 0, shape=(n_meas, n_meas)) @ J[row_start:row_end, :]
-                if i == 0:   # первая точка интервала
-                    R[row_start:row_end] *= self.c0_cost
-                    J[row_start:row_end, :] *= self.c0_cost
-
-                meas_row += 1
+            J_c_shoot_blocks.append(np.vstack(J_c_rows))
 
             # Ограничения непрерывности
             if shoot > 0:
-                row_idx = cont_row * n_state
-                J_G[row_idx:row_idx + n_state, :n_theta] = Jx_prev
-                col_prev = n_theta + (shoot - 1) * n_state
-                J_G[row_idx:row_idx + n_state, col_prev:col_prev + n_state] = Jc_prev
-                col_curr = n_theta + shoot * n_state
-                J_G[row_idx:row_idx + n_state, col_curr:col_curr + n_state] = -np.eye(n_state)
+                row_idx = (shoot - 1) * n_state
+                J_G_theta_blocks.append(Jx_prev)
+                Jc_prev_blocks.append(Jc_prev)
                 R_G[row_idx:row_idx + n_state] = -(state_prev - c0)
-                cont_row += 1
 
             Jx_prev = J_raw[idx_theta, -1].reshape(n_state, n_theta)
             Jc_prev = J_raw[idx_c, -1].reshape(n_state, n_state)
             state_prev = state_traj[:, -1]
 
-        # Преобразуем в CSR для быстрых операций
-        J = J.tocsr()
-        J_G = J_G.tocsr()
+        J = hstack([
+            csr_matrix(np.vstack(J_theta_rows)),
+            block_diag(J_c_shoot_blocks, format='csr'),
+        ], format='csr')
+        R = np.concatenate(R_blocks)
+
+        n_cont = (n_shoot - 1) * n_state
+        if n_cont > 0:
+            # c-часть J_G блочно-бидиагональна: Jc_prev в колонке шута j-1, -I в колонке шута j
+            zeros_col = csr_matrix((n_cont, n_state))
+            lower = hstack([block_diag(Jc_prev_blocks), zeros_col])
+            upper = hstack([zeros_col, -speye(n_cont)])
+            J_G = hstack([csr_matrix(np.vstack(J_G_theta_blocks)), lower + upper], format='csr')
+        else:
+            J_G = csr_matrix((0, n_theta + n_shoot * n_state))
         return J, J_G, R, R_G
 
 
@@ -309,7 +288,6 @@ def compute_delta_gn(J, R, J_G, R_G, mu, lambda_, lambda_reg, theta_full, iter_n
     return delta_theta, new_mu
 
 def run_optimization(problem, config, theta_full, system):
-    import time
     theta_hist = [theta_full[:].copy()]
     r_meas_hist = []
     r_cont_hist = []
