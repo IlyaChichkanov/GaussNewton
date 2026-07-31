@@ -278,7 +278,7 @@ def confidence_intervals(theta_opt, cov, dof, alpha=0.05):
     ci_high = theta_opt + t_crit * se
     return ci_low, ci_high
 
-def compute_delta_gn(J, R, J_G, R_G, mu, lambda_, lambda_reg, theta_full, iter_num, mu_dec):
+def compute_delta_gn(J, R, J_G, R_G, mu, lambda_, lambda_reg, theta_full, mu_dec):
     multiple_shooting = J_G.shape[0] > 0
     n_params = len(theta_full)
     if multiple_shooting:
@@ -300,7 +300,7 @@ def compute_delta_gn(J, R, J_G, R_G, mu, lambda_, lambda_reg, theta_full, iter_n
         new_mu = mu
     return delta_theta, new_mu
 
-def run_optimization(problem, config, theta_full, system):
+def run_optimization(problem, config, theta_full, system, verbose=True):
     theta_hist = [theta_full[:].copy()]
     r_meas_hist = []
     r_cont_hist = []
@@ -316,14 +316,16 @@ def run_optimization(problem, config, theta_full, system):
     # Начальные невязки для сравнения
     J, R, J_G, R_G = problem.solve(theta_full)
     best_cost = np.sum(R**2) + np.sum(R_G**2)  # полная стоимость
-    print(f'  J nnz: {J.nnz}, J_G nnz: {J_G.nnz}')
+    if verbose:
+        print(f'  J nnz: {J.nnz}, J_G nnz: {J_G.nnz}')
     for it in range(config.n_iter):
         iter_start = time.time()
 
         # Логирование текущей стоимости
         meas_cost = np.sum(R**2) / max(1, len(R))
         cont_cost = np.sum(R_G**2) / max(1, len(R_G)) if R_G.size > 0 else 0.0
-        print(f'Iter {it:3d} | R_meas: {meas_cost:.3e} | R_cont: {cont_cost:.3e} | mu: {mu:.2e}')
+        if verbose:
+            print(f'Iter {it:3d} | R_meas: {meas_cost:.3e} | R_cont: {cont_cost:.3e} | mu: {mu:.2e}')
 
         # Ковариация и доверительные интервалы (на текущих J, R)
         cov_theta, _, dof = compute_parameter_covariance(J, R, J_G, R_G, n_theta)
@@ -334,13 +336,14 @@ def run_optimization(problem, config, theta_full, system):
         delta_theta, new_mu = compute_delta_gn(
             J, R, J_G, R_G, mu,
             config.lambda_, config.lambda_reg,
-            theta_full, it, config.mu_dec
+            theta_full, config.mu_dec
         )
 
         theta_trial = theta_full + delta_theta
 
         # Проверяем на NaN в параметрах
         if np.any(np.isnan(theta_trial)):
+            # Печатается независимо от verbose: расходимость не должна пройти молча
             print("NaN в параметрах, остановка.")
             break
 
@@ -358,12 +361,14 @@ def run_optimization(problem, config, theta_full, system):
             consecutive_failures = 0
         else:
             # Шаг плохой: откатываем, mu оставляем прежним
-            print(f"  Шаг отклонён (cost {trial_cost:.3e} > {best_cost:.3e}), mu сохранён {mu:.2e}")
+            if verbose:
+                print(f"  Шаг отклонён (cost {trial_cost:.3e} > {best_cost:.3e}), mu сохранён {mu:.2e}")
             # mu не меняется, оставляем старые J, R и theta_full
             consecutive_failures += 1
             mu = max(mu /config.mu_dec, mu_min)
             if consecutive_failures >= 3:
-                print(f"  Остановка после {consecutive_failures} неудачных шагов подряд")
+                if verbose:
+                    print(f"  Остановка после {consecutive_failures} неудачных шагов подряд")
                 break
         # Сохраняем историю (текущие theta_full и невязки)
         theta_hist.append(theta_full.copy())
@@ -372,10 +377,12 @@ def run_optimization(problem, config, theta_full, system):
 
         # Если mu достиг минимума и улучшений нет, можно остановиться
         if mu <= mu_min and trial_cost > best_cost:
-            print("mu достиг нижней границы, улучшений нет – остановка.")
+            if verbose:
+                print("mu достиг нижней границы, улучшений нет – остановка.")
             break
 
-        print(f'  Iter time: {time.time() - iter_start:.3f}s')
+        if verbose:
+            print(f'  Iter time: {time.time() - iter_start:.3f}s')
 
     ci_low_hist = np.array(ci_low_hist)
     ci_high_hist = np.array(ci_high_hist)
