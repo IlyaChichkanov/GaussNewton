@@ -45,3 +45,13 @@ mpc/tmp_generated/
 
 #Ignore vscode AI rules
 .github/instructions/codacy.instructions.md
+.codacy/
+
+# Сырые логи экспериментов (данные, не код)
+experiments/*.csv
+experiments/voyax_free/
+
+# Артефакты прогонов
+mhe_plot.png
+mhe_results.html
+mhe/mhe_jupyter.html
