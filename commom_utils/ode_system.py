@@ -410,6 +410,49 @@ class SystemJacobian:
                      rtol=self.RTOL, atol=self.ATOL)
         return np.array(sol).T
 
+    def _vmapped_full_integrator(self):
+        """JIT+vmap-обёртка интегратора расширенной системы (кэшируется).
+
+        jax.jit сам перекомпилирует при смене формы (число шутов, длина сетки).
+        """
+        if getattr(self, '_jax_vmap_full', None) is None:
+            n, p = self.nx, self.np
+            J0 = jnp.concatenate([jnp.zeros(n * p), jnp.eye(n).flatten()])
+
+            def integrate_one(c0, t_grid, theta):
+                y0 = jnp.concatenate([c0, J0])
+                return odeint(self.make_full_system_jax, y0, t_grid, *theta,
+                              rtol=self.RTOL, atol=self.ATOL)
+
+            self._jax_vmap_full = jax.jit(
+                jax.vmap(integrate_one, in_axes=(0, 0, None)))
+        return self._jax_vmap_full
+
+    def get_jacobian_solution_jax_batch(self, c0_list, theta, t_grids):
+        """Батчевое интегрирование расширенной системы сразу для всех шутов.
+
+        Шуты группируются по длине временной сетки (vmap требует одинаковых
+        форм), каждая группа интегрируется одним vmap-вызовом odeint.
+
+        c0_list: список/массив (S, nx); t_grids: список массивов времени.
+        Возвращает список из S матриц (nx + nx·np + nx·nx, L_i) — как
+        get_jacobian_solution_jax для каждого шута.
+        """
+        theta_j = jnp.array(np.asarray(theta[:self.np], dtype=float))
+        groups = {}
+        for i, ts in enumerate(t_grids):
+            groups.setdefault(len(ts), []).append(i)
+
+        results = [None] * len(t_grids)
+        integrate = self._vmapped_full_integrator()
+        for idxs in groups.values():
+            ts_stack = jnp.array(np.stack([np.asarray(t_grids[i]) for i in idxs]))
+            c0_stack = jnp.array(np.stack([np.asarray(c0_list[i]) for i in idxs]))
+            sols = np.array(integrate(c0_stack, ts_stack, theta_j))  # (k, L, dim)
+            for j, i in enumerate(idxs):
+                results[i] = sols[j].T
+        return results
+
     # ----------------------------------------------------------------------
     # Вспомогательные методы для расширенной системы (обычный и JAX)
     # ----------------------------------------------------------------------

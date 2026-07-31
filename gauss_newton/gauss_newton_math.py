@@ -148,6 +148,14 @@ class MultipleShooting:
         # шутов предыдущих батчей (оно может отличаться от запрошенного N_shoot)
         c_offset = n_theta + sum(im.N_shoot for im in self.interval_managers[:batch_idx]) * n_state
 
+        if self.use_jax:
+            # Все шуты интегрируются батчево (vmap по шутам внутри)
+            c0_list = [theta_full[c_offset + sh * n_state:
+                                  c_offset + (sh + 1) * n_state]
+                       for sh in range(n_shoot)]
+            sols = self.system.get_jacobian_solution_jax_batch(
+                c0_list, theta, [ti for ti, _ in intervals])
+
         # Плотные блоки якобиана: θ-часть общая для всех строк, c-часть
         # блочно-диагональна по шутам — итоговая J собирается одним hstack.
         J_theta_rows = []      # (n_obs, n_theta) на каждое измерение
@@ -167,7 +175,7 @@ class MultipleShooting:
             c0 = theta_full[start_idx: start_idx + n_state]
 
             if self.use_jax:
-                sol = self.system.get_jacobian_solution_jax(c0, theta, t_interval)
+                sol = sols[shoot]
             else:
                 sol = self.system.get_jacobian_solution(c0, theta, t_interval)
 
