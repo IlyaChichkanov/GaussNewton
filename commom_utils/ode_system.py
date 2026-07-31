@@ -170,6 +170,18 @@ class SystemJacobian:
         self._IDX_JX = slice(self.nx, self.nx + self.nx * self.np)
         self._IDX_JC = slice(self._IDX_JX.stop, self._IDX_JX.stop + self.nx * self.nx)
 
+        # Тождественное наблюдение h(x) = x: dh/dx = I, dh/dθ = 0 —
+        # позволяет полностью пропустить вычисление якобианов наблюдения
+        state_vec = vertcat(*state_list)
+        try:
+            self.identity_observation = (h_observ.shape == state_vec.shape
+                                         and bool(ca.is_equal(h_observ, state_vec, 20)))
+        except Exception:
+            self.identity_observation = False
+
+        # Кэш map-версий функций наблюдения (ключ: (имя, N точек))
+        self._obs_map_cache = {}
+
     # ----------------------------------------------------------------------
     # Вспомогательные методы
     # ----------------------------------------------------------------------
@@ -275,6 +287,47 @@ class SystemJacobian:
         return np.array(self.compute_jacobian_x(*state, *inp, *theta))
 
     # ----------------------------------------------------------------------
+    # Батчевые вычисления наблюдений (CasADi Function.map)
+    # ----------------------------------------------------------------------
+    def _obs_mapped(self, name, n_points):
+        """Map-версия функции наблюдения на n_points точек (с кэшем)."""
+        key = (name, n_points)
+        if key not in self._obs_map_cache:
+            base = {'h': self.res_h,
+                    'dh_dx': self.compute_jacobian_h_x,
+                    'dh_dtheta': self.compute_jacobian_h_theta}[name]
+            self._obs_map_cache[key] = base.map(n_points)
+        return self._obs_map_cache[key]
+
+    def observation_batch(self, states, t_array, theta):
+        """h, dh/dx и dh/dθ сразу для всех точек (3 вызова CasADi вместо 3N).
+
+        Параметры: states (nx, N), t_array (N,), theta (nθ,).
+        Возвращает: h (N, n_obs), dh_dx (N, n_obs, nx), dh_dtheta (N, n_obs, nθ).
+        """
+        n_points = states.shape[1]
+        try:
+            # Интерполяторы обычно принимают массив времени целиком
+            inp = np.array([np.asarray(s, dtype=float).reshape(n_points)
+                            for s in self.f_sym.get_input_signals(np.asarray(t_array))]).T
+        except Exception:
+            inp = np.array([np.asarray(self._get_inp_signals(t), dtype=float).reshape(self.nu)
+                            for t in t_array]).reshape(n_points, self.nu)
+
+        # Каждый скалярный вход map-функции — строка (1, N); theta транслируется
+        args = [states[i, :].reshape(1, n_points) for i in range(self.nx)]
+        args += [inp[:, j].reshape(1, n_points) for j in range(self.nu)]
+        args += [float(theta[k]) for k in range(self.np)]
+
+        h = np.array(self._obs_mapped('h', n_points)(*args))  # (n_obs, N)
+        # map конкатенирует выходы по столбцам: (n_obs, nx*N) -> (N, n_obs, nx)
+        dh_dx = np.array(self._obs_mapped('dh_dx', n_points)(*args))
+        dh_dx = dh_dx.reshape(self.n_obs, n_points, self.nx).transpose(1, 0, 2)
+        dh_dtheta = np.array(self._obs_mapped('dh_dtheta', n_points)(*args))
+        dh_dtheta = dh_dtheta.reshape(self.n_obs, n_points, self.np).transpose(1, 0, 2)
+        return h.T, dh_dx, dh_dtheta
+
+    # ----------------------------------------------------------------------
     # JAX-методы (используют скомпилированные функции из jaxadi)
     # ----------------------------------------------------------------------
     def f_x_theta_jax(self, y, t, *theta):
@@ -341,7 +394,8 @@ class SystemJacobian:
         sol = odeint(self.f_x_theta_jax,
                      jnp.array(c0),
                      jnp.array(t_eval),
-                     *theta[:self.np])
+                     *theta[:self.np],
+                     rtol=self.RTOL, atol=self.ATOL)
         return np.array(sol).T
 
     def get_jacobian_solution_jax(self, c0, theta, t_eval):
@@ -352,7 +406,8 @@ class SystemJacobian:
         J0 = jnp.concatenate([jnp.zeros((n, p)).flatten(), jnp.eye(n).flatten()])
         y0 = jnp.concatenate([jnp.array(c0), J0])
 
-        sol = odeint(self.make_full_system_jax, y0, jnp.array(t_eval), *theta[:p])
+        sol = odeint(self.make_full_system_jax, y0, jnp.array(t_eval), *theta[:p],
+                     rtol=self.RTOL, atol=self.ATOL)
         return np.array(sol).T
 
     # ----------------------------------------------------------------------

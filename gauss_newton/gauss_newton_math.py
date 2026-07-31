@@ -174,28 +174,33 @@ class MultipleShooting:
             state_traj = sol[:n_state, :]
             J_raw = sol[n_state:, :]
 
-            J_c_rows = []
-            for i, idx in enumerate(meas_idx):
-                state = state_traj[:, i]
-                t = t_interval[i]
+            # Столбцы 0..m-1 траектории соответствуют измерениям интервала
+            # (последний столбец — стыковочная точка для непрерывности)
+            m = len(meas_idx)
+            dx_dtheta_all = np.moveaxis(
+                J_raw[idx_theta, :m].reshape(n_state, n_theta, m), 2, 0)   # (m, nx, nθ)
+            dx_dc_all = np.moveaxis(
+                J_raw[idx_c, :m].reshape(n_state, n_state, m), 2, 0)      # (m, nx, nx)
 
-                dh_dx = self.system.dh_dx(state, t, theta)
-                dh_dtheta = self.system.dh_dtheta(state, t, theta)
+            if self.system.identity_observation:
+                # h(x) = x: dh/dx = I, dh/dθ = 0 — якобианы наблюдения не нужны
+                h_pred = state_traj[:, :m].T
+                J_theta_all = dx_dtheta_all
+                J_c_all = dx_dc_all
+            else:
+                h_pred, dh_dx_all, dh_dtheta_all = self.system.observation_batch(
+                    state_traj[:, :m], t_interval[:m], theta)
+                J_theta_all = np.einsum('mij,mjk->mik', dh_dx_all, dx_dtheta_all) + dh_dtheta_all
+                J_c_all = np.einsum('mij,mjk->mik', dh_dx_all, dx_dc_all)
 
-                dx_dtheta = J_raw[idx_theta, i].reshape(n_state, n_theta)
-                dx_dc = J_raw[idx_c, i].reshape(n_state, n_state)
+            # Веса строк: gamma по компонентам наблюдения,
+            # c0_cost — дополнительный вес первой точки интервала
+            W = np.tile(self.gamma if self.gamma is not None else np.ones(n_obs), (m, 1))
+            W[0] *= self.c0_cost
 
-                # Вес строки: gamma по компонентам наблюдения,
-                # c0_cost — дополнительный вес первой точки интервала
-                w = self.gamma if self.gamma is not None else np.ones(n_obs)
-                if i == 0:
-                    w = w * self.c0_cost
-
-                J_theta_rows.append(w[:, None] * (dh_dx @ dx_dtheta + dh_dtheta))
-                J_c_rows.append(w[:, None] * (dh_dx @ dx_dc))
-                R_blocks.append(w * (state_measured[idx] - self.system.h_x(state, t, theta)))
-
-            J_c_shoot_blocks.append(np.vstack(J_c_rows))
+            J_theta_rows.append((W[:, :, None] * J_theta_all).reshape(m * n_obs, n_theta))
+            J_c_shoot_blocks.append((W[:, :, None] * J_c_all).reshape(m * n_obs, n_state))
+            R_blocks.append((W * (state_measured[meas_idx] - h_pred)).ravel())
 
             # Ограничения непрерывности
             if shoot > 0:

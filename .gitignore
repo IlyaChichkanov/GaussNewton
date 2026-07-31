@@ -42,3 +42,6 @@ mhe/tmp_generated/
 
 mpc/tmp_generated/.venv/
 mpc/tmp_generated/
+
+#Ignore vscode AI rules
+.github/instructions/codacy.instructions.md

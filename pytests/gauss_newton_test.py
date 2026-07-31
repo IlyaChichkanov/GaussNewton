@@ -30,7 +30,7 @@ SYSTEMS_CONFIG = {
         "initial_state": np.array([1.0, 1.0, 1.0]),
         "time_interval": (0.0, 5.0),
         "n_measurements": 100,
-        "noise_sigma": 0.05,
+        "sigma": 0.05,
         "N_shoot": 20,
         "mu": 100.0, 
         "theta_init": np.array([0.0, 0.0, 0.0]),
