@@ -133,7 +133,7 @@ def test_identification(system, true_params, synthetic_data, system_config):
     assert np.all(rel_error < 0.05), \
         f"Estimation error too high: {rel_error}"
 
-    plot = 0
+    plot = 1
     if plot:
         fig = plot_solution(
             problem = ms, 

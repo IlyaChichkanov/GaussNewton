@@ -1,10 +1,35 @@
 import time
+from dataclasses import dataclass
 
 import numpy as np
 from commom_utils.ode_system import ODESystem, SystemJacobian
 from scipy.sparse import block_diag, csr_matrix, vstack, hstack, eye as speye, diags
 from scipy.sparse.linalg import spsolve, splu
 from scipy import stats
+
+
+@dataclass
+class ShootRows:
+    """Готовые блоки одного шута — сырьё и для J/R, и для накопления H/g.
+
+    Обозначения как в документе «MS and Orthogonal Collocations»
+    (там s — начальное состояние; в multiple shooting это c_j данного шута):
+
+    J_theta : (m, n_obs, n_theta)  строки dr/dtheta = W (h_x J^(theta)_i + h_theta)
+    J_s     : (m, n_obs, n_state)  строки dr/dc_j   = W  h_x J^(s)_i
+    r       : (m, n_obs)           взвешенные невязки W (y_i - h_i)
+    J_theta_end, J_s_end : чувствительности в конце шута (J^(theta)_N, J^(s)_N) —
+              из них собираются строки непрерывности;
+    x_end   : состояние в конце шута; c0 — начальное состояние шута.
+    """
+    J_theta: np.ndarray
+    J_s: np.ndarray
+    r: np.ndarray
+    J_theta_end: np.ndarray
+    J_s_end: np.ndarray
+    x_end: np.ndarray
+    c0: np.ndarray
+
 
 class TimeIntervalManager:
     def __init__(self, N_shoot, t_eval_measurements):
@@ -132,7 +157,13 @@ class MultipleShooting:
                   f'J: {J_total.shape}, J_G: {J_G_total.shape}')
         return J_total, R_total, J_G_total, R_G_total
 
-    def _solve_batch(self, theta_full, state_measured, t_meas, batch_idx):
+    def shoot_rows(self, theta_full, state_measured, t_meas, batch_idx):
+        """Интегрирование шутов батча + наблюдения + веса -> список ShootRows.
+
+        Общее ядро для обоих способов собрать задачу ГН: `_solve_batch`
+        складывает из этих блоков разреженную J, а накопительный путь
+        (`gauss_newton/normal_equations.py`) сразу сворачивает их в H и g.
+        """
         n_state, n_theta, n_obs = self.system.get_dimentions()
         if self.gamma is not None and len(self.gamma) != n_obs:
             raise ValueError(f"gamma length must be {n_obs}, got {len(self.gamma)}")
@@ -156,20 +187,7 @@ class MultipleShooting:
             sols = self.system.get_jacobian_solution_jax_batch(
                 c0_list, theta, [ti for ti, _ in intervals])
 
-        # Плотные блоки якобиана: θ-часть общая для всех строк, c-часть
-        # блочно-диагональна по шутам — итоговая J собирается одним hstack.
-        J_theta_rows = []      # (n_obs, n_theta) на каждое измерение
-        J_c_shoot_blocks = []  # вертикальный стек c-блоков каждого шута
-        R_blocks = []
-
-        J_G_theta_blocks = []  # (n_state, n_theta) на каждое ограничение
-        Jc_prev_blocks = []
-        R_G = np.zeros((n_shoot - 1) * n_state)
-
-        Jx_prev = None
-        Jc_prev = None
-        state_prev = None
-
+        rows = []
         for shoot, (t_interval, meas_idx) in enumerate(intervals):
             start_idx = c_offset + shoot * n_state
             c0 = theta_full[start_idx: start_idx + n_state]
@@ -206,36 +224,53 @@ class MultipleShooting:
             W = np.tile(self.gamma if self.gamma is not None else np.ones(n_obs), (m, 1))
             W[0] *= self.c0_cost
 
-            J_theta_rows.append((W[:, :, None] * J_theta_all).reshape(m * n_obs, n_theta))
-            J_c_shoot_blocks.append((W[:, :, None] * J_c_all).reshape(m * n_obs, n_state))
-            R_blocks.append((W * (state_measured[meas_idx] - h_pred)).ravel())
+            rows.append(ShootRows(
+                J_theta=W[:, :, None] * J_theta_all,
+                J_s=W[:, :, None] * J_c_all,
+                r=W * (state_measured[meas_idx] - h_pred),
+                J_theta_end=J_raw[idx_theta, -1].reshape(n_state, n_theta),
+                J_s_end=J_raw[idx_c, -1].reshape(n_state, n_state),
+                x_end=state_traj[:, -1],
+                c0=c0,
+            ))
+        return rows
 
-            # Ограничения непрерывности
-            if shoot > 0:
-                row_idx = (shoot - 1) * n_state
-                J_G_theta_blocks.append(Jx_prev)
-                Jc_prev_blocks.append(Jc_prev)
-                R_G[row_idx:row_idx + n_state] = -(state_prev - c0)
+    def continuity_rows(self, rows):
+        """Строки непрерывности (J_G, R_G) из финальных блоков шутов.
 
-            Jx_prev = J_raw[idx_theta, -1].reshape(n_state, n_theta)
-            Jc_prev = J_raw[idx_c, -1].reshape(n_state, n_state)
-            state_prev = state_traj[:, -1]
-
-        J = hstack([
-            csr_matrix(np.vstack(J_theta_rows)),
-            block_diag(J_c_shoot_blocks, format='csr'),
-        ], format='csr')
-        R = np.concatenate(R_blocks)
-
+        G_j = x_j(t_{j+1}; c_j, θ) − c_{j+1}: θ-часть — J^(theta)_N шута j,
+        c-часть блочно-бидиагональна (J^(s)_N в колонке шута j, −I в колонке j+1).
+        """
+        n_state, n_theta, _ = self.system.get_dimentions()
+        n_shoot = len(rows)
         n_cont = (n_shoot - 1) * n_state
-        if n_cont > 0:
-            # c-часть J_G блочно-бидиагональна: Jc_prev в колонке шута j-1, -I в колонке шута j
-            zeros_col = csr_matrix((n_cont, n_state))
-            lower = hstack([block_diag(Jc_prev_blocks), zeros_col])
-            upper = hstack([zeros_col, -speye(n_cont)])
-            J_G = hstack([csr_matrix(np.vstack(J_G_theta_blocks)), lower + upper], format='csr')
-        else:
-            J_G = csr_matrix((0, n_theta + n_shoot * n_state))
+        if n_cont == 0:
+            return csr_matrix((0, n_theta + n_shoot * n_state)), np.zeros(0)
+
+        R_G = np.concatenate([-(rows[j].x_end - rows[j + 1].c0)
+                              for j in range(n_shoot - 1)])
+        zeros_col = csr_matrix((n_cont, n_state))
+        lower = hstack([block_diag([r.J_s_end for r in rows[:-1]]), zeros_col])
+        upper = hstack([zeros_col, -speye(n_cont)])
+        J_G = hstack([csr_matrix(np.vstack([r.J_theta_end for r in rows[:-1]])),
+                      lower + upper], format='csr')
+        return J_G, R_G
+
+    def _solve_batch(self, theta_full, state_measured, t_meas, batch_idx):
+        _, _, n_obs = self.system.get_dimentions()
+        rows = self.shoot_rows(theta_full, state_measured, t_meas, batch_idx)
+
+        # Плотные блоки якобиана: θ-часть общая для всех строк, c-часть
+        # блочно-диагональна по шутам — итоговая J собирается одним hstack.
+        J = hstack([
+            csr_matrix(np.vstack([r.J_theta.reshape(-1, r.J_theta.shape[2])
+                                  for r in rows])),
+            block_diag([r.J_s.reshape(-1, r.J_s.shape[2]) for r in rows],
+                       format='csr'),
+        ], format='csr')
+        R = np.concatenate([r.r.ravel() for r in rows])
+
+        J_G, R_G = self.continuity_rows(rows)
         return J, J_G, R, R_G
 
 
@@ -352,7 +387,7 @@ def run_optimization(problem, config, theta_full, system, verbose=True):
         trial_cost = np.sum(R_trial**2) + np.sum(R_G_trial**2)
 
         # Принимаем шаг только если стоимость уменьшилась (или не изменилась)
-        if not np.isnan(trial_cost) and trial_cost <= best_cost:
+        if not np.isnan(trial_cost) and trial_cost <= best_cost*1.1:
             # Успех: применяем новые параметры и обновляем mu (но не ниже mu_min)
             theta_full = theta_trial
             best_cost = trial_cost
