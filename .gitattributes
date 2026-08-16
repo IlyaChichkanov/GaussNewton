@@ -1,0 +1,2 @@
+# Ноутбуки версионируются без тяжёлого вывода: см. tools/nbstrip.py
+*.ipynb filter=nbstrip
