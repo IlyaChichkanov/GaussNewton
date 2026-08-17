@@ -37,3 +37,9 @@ testpaths = ["pytests"]
 # Корень репозитория в sys.path — чтобы `import commom_utils` работал
 # без ручного sys.path.insert в каждом тесте
 pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py310"          # соответствует requires-python
+# Линтуем библиотечный код. Ноутбуки исключены: они исследовательские, а
+# IPython-магии в ячейках ruff читает как синтаксические ошибки.
+extend-exclude = ["experiments", "*.ipynb"]
