@@ -144,28 +144,6 @@ def test_ind_property():
 
 
 # ---------------------------------------------------------------------------
-# Компилированный марш (rootfinder + mapaccum) против Python-эталона
-# ---------------------------------------------------------------------------
-def test_compiled_matches_python():
-    system = LotkaVoltera()
-    theta = np.array([1.2, 0.4, 0.3, 0.1])
-    c0 = np.array([6.0, 5.0])
-    t_eval = np.linspace(0.0, 4.0, 40)
-
-    py = CollocationSystemJacobian(system, K=3, n_sub=2, use_compiled=False)
-    co = CollocationSystemJacobian(system, K=3, n_sub=2, use_compiled=True)
-
-    sol_py = py.get_jacobian_solution(c0, theta, t_eval)
-    sol_co = co.get_jacobian_solution(c0, theta, t_eval)
-    # Критерии остановки Ньютона различаются (dz vs невязка) — допуск 1e-8
-    assert np.abs(sol_co - sol_py).max() < 1e-8
-
-    st_py = py.get_solution(c0, theta, t_eval)
-    st_co = co.get_solution(c0, theta, t_eval)
-    assert np.abs(st_co - st_py).max() < 1e-8
-
-
-# ---------------------------------------------------------------------------
 # Жёсткая линейная система: dx/dt = -theta (x - sin t) + cos t
 # Точное решение: x(t) = sin t + (c0) e^{-theta t}; L-устойчивость
 # позволяет шаг h=0.1 при theta=1000 (явному методу нужен h ~ 1/theta)

@@ -21,10 +21,18 @@ multiple shooting. Два интегратора чувствительност�
 - `commom_utils/collocation.py`
   - `RadauTables(K)` — узлы Радо IIA (K=1,2,3), матрица дифференцирования
     D̃=[d0|D1], таблица Бутчера `butcher_a = inv(D1)`.
-  - `CollocationSystemJacobian(SystemJacobian)` — переопределяет ТОЛЬКО интеграторы:
-    марш по элементам с Ньютоном и рекурсиями чувствительностей. Два пути:
-    Python-эталон (`use_compiled=False`) и компилированный
-    (`ca.rootfinder('newton')` + `mapaccum` + `map('thread')` по шутам).
+  - `CollocationSystemJacobian(SystemJacobian)` — переопределяет ТОЛЬКО
+    интеграторы: компилированный марш CasADi (`ca.rootfinder('newton')` +
+    `mapaccum` + `map('thread')` по шутам). Python-эталон удалён (авг 2026,
+    решение пользователя); внешние арбитры точности — вариационные уравнения
+    (`collocation_test.py::test_integrator_matches_reference`) и конечные
+    разности (`jacobian_fd_test`). Несходимость Ньютона НЕ бросается из C++
+    (`error_on_fail=False`): каждый элемент возвращает масштабированную
+    невязку `stage_res`, марш проверяет `max(stage_res) <= 10*newton_tol` сам
+    и поднимает RuntimeError одной строкой — без дампов CasADi. Kwargs:
+    `newton_tol` (это И `abstol`, И `abstolStep`; критерии работают как ИЛИ),
+    `newton_maxiter=25`, `rootfinder_plugin`/`rootfinder_options` (переход на
+    kinsol/fast_newton со своими опциями).
 - `commom_utils/systems.py` — конкретные системы (LotkaVoltera, Attractor, ...).
 - `gauss_newton/gauss_newton_math.py`
   - `MultipleShooting` — сборка задачи: `solve(theta_full)` → `(J, R, J_G, R_G)`
@@ -67,7 +75,8 @@ multiple shooting. Два интегратора чувствительност�
   `adaptive_regularization.ipynb` (смысл μ, Нильсен-λ, Пауэлл-μ, эксперименты).
 - `experiments/` — реальные данные и ноутбуки (CSV в .gitignore);
   `experiments/data_utils.py` — `LogReaderV2`, `theta_to_physical`.
-- `pytests/` — `uv run pytest pytests/` (32 теста + 2 skip): gauss_newton_test,
+- `pytests/` — `uv run pytest pytests/` (68 тестов с acados; mhe/mpc-тесты
+  пропускаются без него через `pytest.importorskip`): gauss_newton_test,
   collocation_test, adaptive_test, accumulated_test, collocation_accum_test,
   **jacobian_fd_test** (единственная сверка с ВНЕШНИМ эталоном — конечными
   разностями; остальные тесты взаимные и делят ядро `shoot_rows`).
@@ -97,7 +106,7 @@ multiple shooting. Два интегратора чувствительност�
   Чувствительности по теореме о неявной функции (IND, точные производные
   дискретной схемы): Ψ = (e_Kᵀ⊗I)M⁻¹A, Γ = (e_Kᵀ⊗I)M⁻¹hB F_θ; рекурсии
   S^c ← Ψ S^c (S^c_0 = I), S^θ ← Ψ S^θ + Γ (S^θ_0 = 0).
-  В компилированном пути Ψ/Γ получаются как `ca.jacobian` от выхода rootfinder —
+  В коде Ψ/Γ получаются как `ca.jacobian` от выхода rootfinder —
   CasADi дифференцирует через него той же теоремой о неявной функции.
 - Ковариация θ: σ²·(θ-блок (J_fullᵀJ_full)⁻¹), J_full = [J; J_G], через splu.
 
@@ -115,9 +124,20 @@ multiple shooting. Два интегратора чувствительност�
 - `jax.experimental.odeint`: допуски по умолчанию 1.4e-8 — главный тормоз;
   всегда передавать `rtol=self.RTOL, atol=self.ATOL`.
 - Python dict: `True == 1` → коллизия ключей кэша `(N, True)` и `(N, 1)`;
-  ключи кэшей с строковыми префиксами (`('accum', ...)`).
+  либо строковые префиксы в ключах, либо раздельные словари
+  (`_accum_cache`/`_map_cache` в коллокациях).
 - `ca.rootfinder` не поддерживает codegen/JIT; `map('openmp')` медленнее
   `map('thread')` (CasADi отпускает GIL — потоков достаточно).
+- `abstol` у Newton-rootfinder — АБСОЛЮТНЫЙ допуск на невязку Φ (масштаба
+  состояния): при |x|~1e6 порог 1e-10 недостижим (floor округления ~1e-9),
+  Ньютон «не сходится» только на больших данных. Лекарство — `abstolStep`
+  (допуск по шагу; с abstol работает как ИЛИ, проверка шага ДО его применения).
+- `error_on_fail=True` у rootfinder печатает многострочные C++-дампы входов,
+  даже когда исключение перехвачено питоном (map('thread') усугубляет).
+  Тихий путь: `error_on_fail=False` + свой выход `stage_res` (масштабированная
+  невязка в решении) + проверка после марша. Несошедшийся элемент при
+  error_on_fail=False возвращает последний итерат БЕЗ nan — без проверки
+  stage_res это молча неверные числа.
 - Первая сборка mapaccum-функций ~0.6 с (разово на длину сетки); JAX JIT ~5 с.
 - Радо-базис только по коллокационным точкам (степень K−1, без τ_0=0) —
   ВЫРОЖДЕН (константы в ядре D); правильная постановка — степень K с τ_0=0.
