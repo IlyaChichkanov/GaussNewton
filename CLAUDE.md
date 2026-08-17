@@ -8,7 +8,10 @@ multiple shooting. Два интегратора чувствительност�
 
 - `commom_utils/ode_system.py`
   - `ODESystem` — абстрактная символьная модель (CasADi): `get_derivative`,
-    `get_observation`, `get_input_signals`; размерности `nx`, `np`, `n_inputs`, `n_obs`.
+    `observation`, `get_input_signals`; размерности `nx`, `np`, `nu`, `n_obs`.
+    `get_input_signals` вызывается ИЗНУТРИ правой части ОДУ — с трассируемым t
+    под jax odeint и с массивом t в коллокациях: только `jnp`, без `math.*`
+    и питоновских `if t < ...` (нужен `jnp.where`).
   - `SystemJacobian` — компилирует CasADi-функции f, h и их якобианов; интеграторы
     расширенной системы (состояние + чувствительности) через scipy `solve_ivp` и
     jax `odeint`. Ключевые методы: `get_jacobian_solution`, `get_solution`,
@@ -64,10 +67,15 @@ multiple shooting. Два интегратора чувствительност�
   `adaptive_regularization.ipynb` (смысл μ, Нильсен-λ, Пауэлл-μ, эксперименты).
 - `experiments/` — реальные данные и ноутбуки (CSV в .gitignore);
   `experiments/data_utils.py` — `LogReaderV2`, `theta_to_physical`.
-- `pytests/` — `python -m pytest pytests/` (gauss_newton_test.py +
-  collocation_test.py + adaptive_test.py + accumulated_test.py +
-  collocation_accum_test.py, 30 тестов). Тесты с `PLOT = 1` открывают фигуры
-  plotly (`gauss_newton_test.py`, `collocation_accum_test.py`).
+- `pytests/` — `uv run pytest pytests/` (32 теста + 2 skip): gauss_newton_test,
+  collocation_test, adaptive_test, accumulated_test, collocation_accum_test,
+  **jacobian_fd_test** (единственная сверка с ВНЕШНИМ эталоном — конечными
+  разностями; остальные тесты взаимные и делят ядро `shoot_rows`).
+  mhe_test/mpc_test пропускаются без acados (`pytest.importorskip`).
+  Фигуры plotly по умолчанию не открываются — `GN_TEST_PLOT=1` включает.
+- `tools/setup_repo.sh` — регистрирует git-фильтр `nbstrip` (`.gitattributes`
+  объявляет `filter=nbstrip`, но сам фильтр локальный и в репозиторий не
+  попадает; без запуска скрипта тяжёлый вывод ноутбуков вернётся в историю).
 
 ## Математическая суть
 
@@ -113,6 +121,20 @@ multiple shooting. Два интегратора чувствительност�
 - Первая сборка mapaccum-функций ~0.6 с (разово на длину сетки); JAX JIT ~5 с.
 - Радо-базис только по коллокационным точкам (степень K−1, без τ_0=0) —
   ВЫРОЖДЕН (константы в ядре D); правильная постановка — степень K с τ_0=0.
+- РАЗРЫВНЫЙ по времени вход ломает точность чувствительностей у явного
+  адаптивного solve_ivp: он перешагивает излом, контроль ошибки там не
+  работает, якобиан расходится с конечными разностями на 3+ порядка
+  (`jacobian_fd_test::test_discontinuous_input_degrades_sensitivities`).
+  Обход: граница шута в точке разрыва либо коллокации. У коллокаций этой
+  проблемы нет — сетка элементов фиксирована.
+- Сверка якобиана конечными разностями: шаг 1e-7 годится не всегда. Ошибка,
+  падающая строго как 1/h, — это ШУМ ОКРУГЛЕНИЯ интегратора, а не баг
+  якобиана (у Integrator состояние растёт как t², нужен шаг ~1e-4).
+  Отличить от настоящей ошибки помогает прогон той же задачи на коллокациях:
+  IND даёт точные производные схемы и согласуется до ~1e-10.
+- `df_dx_jax` отдаёт (1, nx, nx), `df_dtheta_jax` — уже (nx, np). Матумножение
+  на (1,·,·) молча даёт лишнюю ось; в `make_full_system_jax` форма приводится
+  явным `.reshape`.
 
 ## Производительность (реальные данные, 8000 точек, 10 шутов)
 

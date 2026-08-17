@@ -21,7 +21,11 @@ from gauss_newton.normal_equations import CollocationShootingAccum
 from gauss_newton.adaptive import run_optimization_adaptive
 from gauss_newton.utils import plot_solution
 
-PLOT = 1   # 0 — не открывать фигуры (например, в CI)
+import os
+
+# По умолчанию фигуры НЕ открываются: fig.show() в тесте вешает CI и любой
+# headless-прогон. Включить локально: GN_TEST_PLOT=1 pytest ...
+PLOT = os.environ.get("GN_TEST_PLOT", "0") not in ("0", "", "false", "False")
 
 SYSTEMS_CONFIG = {
     "LotkaVolterra": {

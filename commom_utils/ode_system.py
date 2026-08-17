@@ -373,11 +373,14 @@ class SystemJacobian:
             Jx = y[self._IDX_JX].reshape((n, p))
             Jc = y[self._IDX_JC].reshape((n, n))
 
+            # f_x считается ОДИН раз и применяется к склейке [Jx | Jc]:
+            # J̇_θ = f_x J_θ + f_θ, J̇_c = f_x J_c — общий множитель f_x
+            f_x = self.df_dx(x, t, theta[:p])
             dx = self.f_x_theta(x, t, theta[:p])
-            dJx = self.df_dx(x, t, theta[:p]) @ Jx + self.df_dtheta(x, t, theta[:p])
-            dJc = self.df_dx(x, t, theta[:p]) @ Jc
+            dJ = f_x @ np.concatenate([Jx, Jc], axis=1)
+            dJ[:, :p] += self.df_dtheta(x, t, theta[:p])
 
-            return np.concatenate([dx, dJx.flatten(), dJc.flatten()])
+            return np.concatenate([dx, dJ[:, :p].flatten(), dJ[:, p:].flatten()])
 
         sol = solve_ivp(full_ode, (t_eval[0], t_eval[-1]), y0,
                         t_eval=t_eval, method=self.method,
@@ -493,12 +496,23 @@ class SystemJacobian:
         return dJc.flatten()
 
     def make_full_system_jax(self, state, t, *theta):
-        """JAX-версия расширенной системы."""
-        x = state[:self.nx]
+        """JAX-версия расширенной системы.
+
+        f_x вычисляется один раз и применяется к склейке [J_θ | J_c]
+        (см. get_jacobian_solution — та же схема в numpy-пути).
+        """
+        n, p = self.nx, self.np
+        x = state[:n]
+        Jx = state[self._IDX_JX].reshape((n, p))
+        Jc = state[self._IDX_JC].reshape((n, n))
+
+        # df_dx_jax отдаёт (1, n, n) — приводим к (n, n) явно, а не полагаемся
+        # на broadcast (раньше он молча давал (1, n, p) на выходе матумножения)
+        f_x = self.df_dx_jax(x, t, theta).reshape((n, n))
         dx = self.f_x_theta_jax(x, t, *theta)
-        dJx = self._jacobian_x_jax(state, t, theta)
-        dJc = self._jacobian_c_jax(state, t, theta)
-        return jnp.concatenate([dx, dJx, dJc])
+        dJ = f_x @ jnp.concatenate([Jx, Jc], axis=1)
+        dJx = dJ[:, :p] + self.df_dtheta_jax(x, t, theta)
+        return jnp.concatenate([dx, dJx.flatten(), dJ[:, p:].flatten()])
 
     # ----------------------------------------------------------------------
     # Обратная совместимость (старые названия методов, если они использовались)

@@ -6,12 +6,19 @@ def get_input_signals_bycicle(t):
     w = 2.7
     steering = 0.8 * jnp.cos(t * 0.25 * w) * jnp.sin(w * t)
     v = 10.0
-    if(t < 10):
-        steering = 0
+    # jnp.where вместо `if t < 10`: внутри jax odeint время трассируется,
+    # и питоновское сравнение падает с TracerBoolConversionError
+    steering = jnp.where(t < 10.0, 0.0, steering)
     return [v, steering, 2.65]          # порядок: steering, vx (как ожидает LateralCarDynamic)
 
 def harmonic(t):
     return [jnp.cos(0.3 * t) * jnp.sin(0.1 * t + np.pi / 2)]
+
+
+# Возмущения начального приближения фиксированы seed-ом: раньше здесь стоял
+# голый np.random.rand на уровне модуля, из-за чего конфигурация менялась
+# при каждом импорте и эксперименты были невоспроизводимы.
+_CFG_RNG = np.random.default_rng(0)
 
 
 SYSTEM_CONFIGS = {
@@ -23,7 +30,7 @@ SYSTEM_CONFIGS = {
         "args": [],
         "c0": np.array([6.0, 5.0]),
         "theta_true": np.array([1.2, 0.4, 0.3, 0.1]),
-        "delta_theta": np.array([0.2, -0.11, 0.05, 0.01]) * 0.7 + (np.random.rand(4) - 0.5) * 0.05,
+        "delta_theta": np.array([0.2, -0.11, 0.05, 0.01]) * 0.7 + (_CFG_RNG.random(4) - 0.5) * 0.05,
         "input_signal": None,                          # нет входа
         "observation": lambda state, theta, u: vertcat(state[0], state[1]),
         "get_initial_state": lambda y_meas, u, theta: y_meas,
@@ -33,7 +40,7 @@ SYSTEM_CONFIGS = {
         "args": [2.5],                                 # wheelbase
         "c0": np.array([0.0, 0.0]),
         "theta_true": np.array([3.90697911, -3.61844364, 11.46438743, 10.16318852]),
-        "delta_theta": (np.random.rand(4) - 0.5) * 2,
+        "delta_theta": (_CFG_RNG.random(4) - 0.5) * 2,
         "input_signal": get_input_signals_bycicle,  # steering, vx
         "observation": lambda state, theta, u: vertcat(state[0], state[1]),
         "get_initial_state": lambda y_meas, u, theta: y_meas,
@@ -43,7 +50,7 @@ SYSTEM_CONFIGS = {
         "args": [],
         "c0": np.array([-10.0, 10.0, 30.0]),
         "theta_true": np.array([10.0, 28.0, 8/3]),
-        "delta_theta": (np.random.rand(3) - 0.5) * 10.0,
+        "delta_theta": (_CFG_RNG.random(3) - 0.5) * 10.0,
         "input_signal": None,
         "observation": lambda state, theta, u: state,  # все координаты
         "get_initial_state": lambda y_meas, u, theta: y_meas,
@@ -227,7 +234,11 @@ def create_system(cfg: dict):
         ConfiguredSystem.get_initial_state = lambda self, y_meas, u, theta: y_meas
 
     system = ConfiguredSystem(*cfg["args"])
-    return system, cfg["c0"].copy(), cfg["theta_true"].copy(), cfg["delta_theta"].copy()  
+    # delta_theta может быть None («не возмущаем») — раньше .copy() на нём падал
+    delta_theta = cfg.get("delta_theta")
+    if delta_theta is not None:
+        delta_theta = np.asarray(delta_theta).copy()
+    return system, cfg["c0"].copy(), cfg["theta_true"].copy(), delta_theta
 
 
 from mhe.params import MheParams

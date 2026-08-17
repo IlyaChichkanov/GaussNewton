@@ -32,11 +32,32 @@ class ShootRows:
 
 
 class TimeIntervalManager:
+    """Разбиение сетки измерений на шуты.
+
+    Фактическое число шутов (`self.N_shoot`) может отличаться от запрошенного:
+    узлы ставятся с постоянным шагом `len(t) // N_shoot`, поэтому при неполном
+    делении последний интервал длиннее остальных. Последняя точка сетки —
+    только стыковочная (в невязку измерений не входит).
+    """
+
     def __init__(self, N_shoot, t_eval_measurements):
         self.t_eval_measurements = t_eval_measurements
         N_measurement = len(t_eval_measurements)
+        if N_measurement < 2:
+            raise ValueError(
+                f"Нужно минимум 2 точки измерений, получено {N_measurement}")
+        if int(N_shoot) < 1:
+            raise ValueError(f"N_shoot должен быть >= 1, получено {N_shoot}")
+
         self.measurement_indexes = np.arange(N_measurement)
-        shoot_indexes = self.measurement_indexes[0:-1:int(len(self.measurement_indexes)/N_shoot)]
+        step = N_measurement // int(N_shoot)
+        if step < 1:
+            # step == 0 давал `ValueError: slice step cannot be zero` из среза ниже
+            raise ValueError(
+                f"N_shoot={N_shoot} больше числа измерений ({N_measurement}); "
+                f"максимум для этой сетки — {N_measurement}")
+
+        shoot_indexes = self.measurement_indexes[0:-1:step]
         self.shoot_indexes = np.append(shoot_indexes, self.measurement_indexes[-1])
         self.N_shoot = len(self.shoot_indexes) - 1
 

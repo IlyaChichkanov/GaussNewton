@@ -12,8 +12,28 @@ dependencies = [
     "matplotlib>=3.10.8",
     "nbformat>=5.10.4",
     "numpy>=2.2.6",
+    "pandas>=2.2.0",
     "plotly>=6.9.0",
     "pytest>=9.0.2",
     "scipy>=1.15.3",
     "tqdm>=4.67.3",
 ]
+
+# acados_template ставится не из PyPI, а из исходников acados
+# (interfaces/acados_template), поэтому его нет в dependencies —
+# см. README, раздел «MHE и MPC». Тесты mhe/mpc без него пропускаются.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Проект ставится в venv (uv sync), поэтому `import commom_utils` работает
+# из любой директории, а не только из корня репозитория.
+[tool.hatch.build.targets.wheel]
+packages = ["commom_utils", "gauss_newton", "mhe", "mpc"]
+
+[tool.pytest.ini_options]
+testpaths = ["pytests"]
+# Корень репозитория в sys.path — чтобы `import commom_utils` работал
+# без ручного sys.path.insert в каждом тесте
+pythonpath = ["."]
