@@ -1,5 +1,7 @@
 # GaussNewton — идентификация параметров ОДУ
 
+[![CI](https://github.com/IlyaChichkanov/GaussNewton/actions/workflows/ci.yml/badge.svg)](https://github.com/IlyaChichkanov/GaussNewton/actions/workflows/ci.yml)
+
 Оценка параметров θ нелинейных динамических систем по зашумлённым измерениям:
 **метод Гаусса–Ньютона + multiple shooting**, с совместной оценкой θ и начальных
 состояний шутов. Дополнительно — **MHE** (скользящее окно, рекурсивный вариант
