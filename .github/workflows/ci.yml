@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Новый пуш в PR отменяет предыдущий прогон — не жжём runner на устаревшем коде
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: pytest (Python 3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # headless-раннер: mpc_test импортирует pyplot до importorskip
+      MPLBACKEND: Agg
+      # не открывать фигуры plotly (это и есть значение по умолчанию)
+      GN_TEST_PLOT: "0"
+    steps:
+      - uses: actions/checkout@v7
+
+      # ВНИМАНИЕ: setup-uv публикует только полные semver-теги (v10.0.1),
+      # плавающего мажорного `v10` у него НЕТ — такой ref не резолвится.
+      # У actions/checkout, наоборот, мажорные теги есть.
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      # --frozen: ставим строго по uv.lock, не переразрешая зависимости
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # mhe_test/mpc_test пропускаются: acados ставится из исходников, не из PyPI
+      - name: Run tests
+        run: uv run pytest pytests/ -v --durations=10
+
+  lint:
+    name: ruff (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Отчёт, а не гейт: на текущем коде ruff даёт ~130 замечаний,
+    # блокировать ими merge нельзя. Ужесточать по мере разбора.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      # Версия закреплена, чтобы обновление ruff само по себе не меняло отчёт.
+      # Настройки (target-version, exclude) — в pyproject.toml, поэтому
+      # локальный `uvx ruff check` даёт тот же результат.
+      - name: Run ruff
+        run: uvx ruff@0.15.8 check --output-format=github .
