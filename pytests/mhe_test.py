@@ -6,6 +6,13 @@ import math
 import plotly.io as pio
 import numpy as np
 import pytest
+import pytest
+
+# acados ставится из исходников, а не из PyPI: без него модуль
+# целиком пропускается, иначе падала СБОРКА всего pytests/
+pytest.importorskip("acados_template",
+                    reason="acados_template не установлен — см. README")
+
 from acados_template import AcadosOcp
 from commom_utils.ode_system import check_system_ok, MHESyntheticDataGenerator
 from commom_utils.systems import KinematicModel, DelayOffset, LotkaVoltera  # add other systems as needed

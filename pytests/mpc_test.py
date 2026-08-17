@@ -9,6 +9,13 @@ import shutil
 from pathlib import Path
 import matplotlib.pyplot as plt
 
+import pytest
+
+# acados ставится из исходников, а не из PyPI: без него модуль
+# целиком пропускается, иначе падала СБОРКА всего pytests/
+pytest.importorskip("acados_template",
+                    reason="acados_template не установлен — см. README")
+
 from acados_template import AcadosOcp
 from commom_utils.systems import KinematicBycicleErrors
 from mpc.mpc_base_interface import KinematicMpcCodegenerator

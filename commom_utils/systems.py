@@ -47,21 +47,22 @@ class Pendulum(ODESystem):
     def get_derivative(self, state, theta, u):
         g = 10
         M, m, l = theta[0], theta[1], theta[2]
-        x1, theta, v1, dtheta = state[0], state[1], state[2], state[3]
+        # phi — угол маятника (раньше переменная называлась theta и затеняла параметры)
+        x1, phi, v1, dphi = state[0], state[1], state[2], state[3]
         F = u[0]
-        denominator = M + m - m*np.cos(theta)*np.cos(theta)
+        denominator = M + m - m*ca.cos(phi)*ca.cos(phi)
         f_expl = vertcat(v1,
-                        dtheta,
-                        (-m*l*np.sin(theta)*dtheta*dtheta + m*g*np.cos(theta)*np.sin(theta)+F)/denominator,
-                        (-m*l*np.cos(theta)*np.sin(theta)*dtheta*dtheta + F*np.cos(theta)+(M+m)*g*np.sin(theta))/(l*denominator))
+                        dphi,
+                        (-m*l*ca.sin(phi)*dphi*dphi + m*g*ca.cos(phi)*ca.sin(phi)+F)/denominator,
+                        (-m*l*ca.cos(phi)*ca.sin(phi)*dphi*dphi + F*ca.cos(phi)+(M+m)*g*ca.sin(phi))/(l*denominator))
 
         return f_expl
 
 
     def observation(self, state, theta, u):
-        x1, theta, v1, dtheta = state[0], state[1], state[2], state[3]
-        return x1, theta
-        
+        x1, phi = state[0], state[1]
+        return vertcat(x1, phi)
+
     def get_input_signals(self, t):
         return [jnp.sin(0.2*t)]
 
@@ -210,12 +211,12 @@ class MassSpringDamper(ODESystem):
     
     
     def get_input_signals(self, t):
-        import math
+        # jnp + where вместо math + if: функция вызывается и с обычным float,
+        # и с трассируемым t внутри jax odeint (питоновский if там падает
+        # с TracerBoolConversionError), и с массивом времени в коллокациях
         w = 0.7
-        u = 0.8 * math.cos(t * 0.25 * w) * math.sin(w * t)
-        if t < 1:
-            u = 0
-        return [u]
+        u = 0.8 * jnp.cos(t * 0.25 * w) * jnp.sin(w * t)
+        return [jnp.where(t < 1.0, 0.0, u)]
 
 class KinematicBycicleErrors(ODESystem):
     def __init__(self, wheelbase):
@@ -299,14 +300,15 @@ class KinematicBycicleActuator(ODESystem):
         self.kv = kv
 
     def get_derivative(self, state, params, input_signals):
+        # state = [psi, delta, delta_dot]
         psi = state[0]
-        delta = state[2]
+        delta = state[1]
         delta_dot = state[2]
         GR = params[0]
         offset = params[1]
         vx = input_signals[0]
         steering = input_signals[1]
-        dpsi = vx * (np.tan(delta)) / (self.wheelbase) 
+        dpsi = vx * (ca.tan(delta)) / (self.wheelbase)
         ddelta = delta_dot
         rwa = GR * steering + offset
         ddelta_dot = self.kp * (rwa - delta) - self.kv * delta_dot
@@ -357,7 +359,8 @@ class KinematicModelDelay(ODESystem):
 
 class RosenzweigMacArthur(ODESystem):
     def __init__(self):
-        super().__init__(nx=2, nu=0, np=1)
+        # get_derivative распаковывает 6 параметров: r, K, a, h, e, m
+        super().__init__(nx=2, nu=0, np=6)
 
    
     def get_derivative(self, state, params, input_signals):
@@ -416,8 +419,8 @@ class Quadrotor2D(ODESystem):
         dphi_dt = phi_dot
 
         # Ускорения: горизонтальное, вертикальное и угловое
-        dx_dot_dt = -(F_total / m) * np.sin(phi)
-        dz_dot_dt = (F_total / m) * np.cos(phi) - g
+        dx_dot_dt = -(F_total / m) * ca.sin(phi)
+        dz_dot_dt = (F_total / m) * ca.cos(phi) - g
         dphi_dot_dt = (k_M / J) * u
 
         # Собираем вектор производных
@@ -426,7 +429,8 @@ class Quadrotor2D(ODESystem):
         return rhs
     
     def get_input_signals(self, t):
-        u = 0.5*np.sin(0.05*t) + t
+        # jnp — чтобы сигнал был трассируемым в jax-режиме (см. MassSpringDamper)
+        u = 0.5*jnp.sin(0.05*t) + t
         return [u]
 
 
@@ -456,7 +460,8 @@ class Integrator(ODESystem):
         return rhs
 
     def get_input_signals(self, t):
-        u = 0.5*np.sin(0.5*t) + t*0.001*np.sin(t)
+        # jnp — чтобы сигнал был трассируемым в jax-режиме (см. MassSpringDamper)
+        u = 0.5*jnp.sin(0.5*t) + t*0.001*jnp.sin(t)
         return [u]
     
     def observation(self, state, theta, u):
