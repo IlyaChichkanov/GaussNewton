@@ -142,6 +142,32 @@ def test_identification_adaptive(system_name):
 
 
 # ---------------------------------------------------------------------------
+# Гейт Пауэлла (rss_stall_tol): Аттрактор сходится и при МАЛОМ числе шутов
+# ---------------------------------------------------------------------------
+def test_attractor_converges_with_few_shoots():
+    """Attractor, N_shoot=5, theta0=0 — закрепляет гейт rss_stall_tol.
+
+    Без гейта mu утаптывается на ранних итерациях (rss ещё падает на порядки,
+    а стыковка колеблется), ограничения начинают доминировать, и решение
+    запирается на консистентной траектории вдали от измерений
+    (rel_err ~ 1.2, rss ~ 9e3 при r_cont ~ 1e-10). С гейтом тот же случай
+    сходится: rel_err ~ 3e-4, стыковка затягивается до ~1e-10.
+    """
+    config = dict(SYSTEMS_CONFIG["Attractor"], N_shoot=5)
+    _, t_meas, meas = generate_data(config)
+    prob = make_problem(config, t_meas, meas)
+    theta_full = prob.make_full_theta(config["theta_init"])
+
+    theta_opt, hist = run_optimization_adaptive(prob, theta_full, n_iter=80,
+                                                track_covariance=False)
+
+    err = rel_err(theta_opt, config["true_params"])
+    assert err < 1e-2, f"запирание на консистентной траектории: rel_err={err:.3e}"
+    # стыковка при этом дотянута штрафом, а не брошена
+    assert hist["r_cont"][-1] < 1e-6
+
+
+# ---------------------------------------------------------------------------
 # Цикл действительно МИНИМИЗИРУЕТ: эталон - стоимость в истинной точке
 # ---------------------------------------------------------------------------
 def test_beats_cost_at_true_parameters():

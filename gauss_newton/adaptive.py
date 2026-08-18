@@ -12,7 +12,8 @@ gauss_newton/normal_equations.py — как они получены (через 
 - mu (обратный вес невязок стыковки: шаг — это ГН для
   Phi_mu = ||R||^2 + (1/mu)||R_G||^2) стартует по кривизне
   ||J_G||_F^2 / tr(H) и ужесточается по Пауэллу — только когда невязка
-  стыковки не падает сама;
+  стыковки не падает сама И измерительная невязка застопорилась
+  (гейт rss_stall_tol);
 - шаг принимается по той же Phi_mu, для которой посчитан (rho > 0),
   а не по '<= 1.1*best';
 - есть остановка (серия отказов / стагнация / pred ~ 0), поэтому n_iter —
@@ -58,7 +59,7 @@ def gn_step(ne, mu, lam, lambda_reg=0.0):
 def run_optimization_adaptive(problem, theta_full, n_iter=40,
                               lam0=1e-3, lambda_reg=0.0,
                               mu_rule='curvature', mu_dec=0.5,
-                              viol_target=0.25, kappa=0.1,
+                              viol_target=0.25, rss_stall_tol=0.99, kappa=0.1,
                               mu_min=1e-8, mu_max=1e8,
                               rho_accept=0.0, max_rejects=8,
                               track_covariance=True, verbose=False):
@@ -70,9 +71,16 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
     Параметры безразмерны, дефолты проверены на ЛВ/Аттракторе/реальных данных:
     - lam0: стартовый демпфер, дальше управляется gain ratio;
     - mu_rule: 'curvature' (рекомендуется) — старт ||J_G||_F^2/tr(H),
-      ужесточение mu*mu_dec, когда ||R_G||^2 > viol_target*||R_G||^2_prev;
+      ужесточение mu*mu_dec, когда ||R_G||^2 > viol_target*||R_G||^2_prev
+      И измерительная невязка застопорилась (см. rss_stall_tol);
       'ratio' — mu = ||R_G||^2/(kappa*||R||^2) (хуже на реальных данных,
       см. ноутбук §8);
+    - rss_stall_tol: гейт Пауэлла — mu ужимается только когда
+      ||R||^2 > rss_stall_tol*||R||^2_prev, т.е. измерения уже выжаты.
+      Без гейта mu утаптывается на ранних итерациях (rss падает на порядки,
+      стыковка колеблется), ограничения начинают доминировать и решение
+      запирается на консистентной траектории вдали от измерений — Attractor
+      при N_shoot=5 сходится с гейтом и не сходится без него;
     - rho_accept: порог принятия шага по gain ratio;
     - track_covariance: считать доверительные интервалы theta по ходу
       (для plot_solution), стоит один splu на итерацию.
@@ -103,7 +111,7 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
         mu = float(np.clip(ne.mu_curvature(), mu_min, mu_max))
     else:
         mu = mu_ratio(ne)
-    prev_cont = ne.cont_sq()
+    prev_cont, prev_rss = ne.cont_sq(), ne.rss
 
     hist = dict(theta=[], cost=[], mu=[], lam=[], r_meas=[], r_cont=[],
                 ci_low=[], ci_high=[], accepted=[], n_solves=1)
@@ -146,11 +154,14 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
             lam = max(lam * max(1 / 3, 1 - (2 * rho - 1) ** 3), 1e-12)
             nu_esc, rejects = 2.0, 0
             if ne.n_cont > 0:
-                cont = ne.cont_sq()
+                cont, rss = ne.cont_sq(), ne.rss
                 if mu_rule == 'curvature':
-                    if cont > viol_target * prev_cont:  # стыковка сама не падает
-                        mu = max(mu * mu_dec, mu_min)   # -> ужесточаем штраф
-                    prev_cont = cont
+                    # Пауэлл с гейтом: ужесточаем штраф, только когда стыковка
+                    # сама не падает И измерения уже выжаты — пока rss падает,
+                    # mu не трогаем (иначе преждевременное запирание, docstring)
+                    if cont > viol_target * prev_cont and rss > rss_stall_tol * prev_rss:
+                        mu = max(mu * mu_dec, mu_min)
+                    prev_cont, prev_rss = cont, rss
                 else:
                     mu = mu_ratio(ne)
             hist['accepted'].append(it)
