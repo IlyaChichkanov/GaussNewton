@@ -14,16 +14,16 @@
     документ                    здесь                смысл
     -------------------------   ------------------   ------------------------------
     s                           c_j                  начальное состояние (у нас — шута j)
-    J^(theta)_i, J^(s)_i        S^theta, S^c         чувствительности x(t_i) по theta и c_j
+    J^(theta)_i, J^(s)_i        S_theta, S_c         чувствительности x(t_i) по theta и c_j
     J^(s)_{k+1|k}               Psi  (collocation)   переход состояния за элемент
     J^(theta)_{k+1|k}           Gamma(collocation)   вклад параметров за элемент
     h_x, h_theta                dh_dx, dh_dtheta     якобианы наблюдения
     r_i = y_i - h(x_i, theta)   ShootRows.r          невязка (в коде уже взвешена)
-    J_i строка = [h_x J^(theta)_i + h_theta | h_x J^(s)_i]
+    J_i строка = [h_x S_theta_i + h_theta | h_x S_c_i]
                                 ShootRows.J_theta,   (см. gauss_newton.problem.ShootRows)
-                                ShootRows.J_s
-    H^(theta), H^(theta s), H^(s)  H_theta, H_theta_s, H_s   блоки H
-    g                           g_theta, g_s         блоки градиента
+                                ShootRows.J_c
+    H^(theta), H^(theta s), H^(s)  H_theta, H_theta_c, H_c   блоки H
+    g                           g_theta, g_c         блоки градиента
 
 Отличие от документа — multiple shooting: неизвестных не [theta; s], а
 [theta; c_1..c_T], поэтому H «стрелочная»: измерения шута j затрагивают только
@@ -121,7 +121,7 @@ class AccumulateMixin:
         n_state, n_theta, _ = self.system.dims()
         H_theta = np.zeros((n_theta, n_theta))   # документ: H^(theta)
         g_theta = np.zeros(n_theta)              # документ: g, theta-часть
-        H_theta_s, H_s, g_s = [], [], []         # по одному блоку на шут
+        H_theta_c, H_c, g_c = [], [], []         # по одному блоку на шут
         J_G_batches, R_G_batches = [], []
         rss = 0.0
         n_rows = 0
@@ -132,14 +132,14 @@ class AccumulateMixin:
             rows = self.shoot_rows(theta_full, state_measured, t_meas, batch)
 
             for shoot in rows:
-                J_theta, J_s, r = shoot.J_theta, shoot.J_s, shoot.r
+                J_theta, J_c, r = shoot.J_theta, shoot.J_c, shoot.r
                 # Суммы по точкам шута ('m') — векторизованная запись
                 # рекурсий H_{k+1} = H_k + J_{k+1}^T J_{k+1}, g_{k+1} = g_k + J_{k+1}^T r_{k+1}
                 H_theta += np.einsum('mop,moq->pq', J_theta, J_theta)
-                H_theta_s.append(np.einsum('mop,mos->ps', J_theta, J_s))
-                H_s.append(np.einsum('mos,mou->su', J_s, J_s))
+                H_theta_c.append(np.einsum('mop,moc->pc', J_theta, J_c))
+                H_c.append(np.einsum('moc,mod->cd', J_c, J_c))
                 g_theta += np.einsum('mop,mo->p', J_theta, r)
-                g_s.append(np.einsum('mos,mo->s', J_s, r))
+                g_c.append(np.einsum('moc,mo->c', J_c, r))
                 rss += float((r * r).sum())
                 n_rows += r.size
 
@@ -148,16 +148,16 @@ class AccumulateMixin:
             R_G_batches.append(R_G)
 
         # Стрелочная сборка: theta-строка сверху, по блоку на шут по диагонали
-        T = len(H_s)
-        blocks = [[csr_matrix(H_theta)] + [csr_matrix(B) for B in H_theta_s]]
+        T = len(H_c)
+        blocks = [[csr_matrix(H_theta)] + [csr_matrix(B) for B in H_theta_c]]
         for j in range(T):
-            row = [csr_matrix(H_theta_s[j].T)] + [None] * T
-            row[1 + j] = csr_matrix(H_s[j])
+            row = [csr_matrix(H_theta_c[j].T)] + [None] * T
+            row[1 + j] = csr_matrix(H_c[j])
             blocks.append(row)
 
         return NormalEquations(
             H=bmat(blocks, format='csr'),
-            g=np.concatenate([g_theta] + g_s),
+            g=np.concatenate([g_theta] + g_c),
             J_G=self._concatenate_jacobian_batches(J_G_batches),
             R_G=np.concatenate(R_G_batches),
             rss=rss, n_rows=n_rows)

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from commom_utils.ode_system import ODESystem, SystemJacobian
+from commom_utils.sensitivity import SensitivityTrajectory
 from scipy.sparse import block_diag, csr_matrix, vstack, hstack, eye as speye
 
 
@@ -10,23 +11,65 @@ from scipy.sparse import block_diag, csr_matrix, vstack, hstack, eye as speye
 class ShootRows:
     """Готовые блоки одного шута — сырьё и для J/R, и для накопления H/g.
 
-    Обозначения как в документе «MS and Orthogonal Collocations»
-    (там s — начальное состояние; в multiple shooting это c_j данного шута):
+    Две группы величин, которые раньше назывались одинаково:
 
-    J_theta : (m, n_obs, n_theta)  строки dr/dtheta = W (h_x J^(theta)_i + h_theta)
-    J_s     : (m, n_obs, n_state)  строки dr/dc_j   = W  h_x J^(s)_i
-    r       : (m, n_obs)           взвешенные невязки W (y_i - h_i)
-    J_theta_end, J_s_end : чувствительности в конце шута (J^(theta)_N, J^(s)_N) —
-              из них собираются строки непрерывности;
-    x_end   : состояние в конце шута; c0 — начальное состояние шута.
+    J_* — строки ЯКОБИАНА НЕВЯЗОК (то, из чего собирается J):
+        J_theta : (m, n_obs, n_theta)  dr/dtheta = W (h_x S_theta + h_theta)
+        J_c     : (m, n_obs, n_state)  dr/dc_j   = W  h_x S_c
+        r       : (m, n_obs)           взвешенные невязки W (y_i - h_i)
+
+    S_*_end — ЧУВСТВИТЕЛЬНОСТИ СОСТОЯНИЯ в конце шута (не строки якобиана!),
+    из них собираются строки непрерывности:
+        S_theta_end : (n_state, n_theta)   dx(tau_{j+1})/dtheta
+        S_c_end     : (n_state, n_state)   dx(tau_{j+1})/dc_j
+
+    x_end — состояние в конце шута; c0 — начальное состояние шута.
+
+    В документе «MS and Orthogonal Collocations» начальное состояние
+    обозначено s; здесь это c_j данного шута, и второе имя не заводится.
     """
     J_theta: np.ndarray
-    J_s: np.ndarray
+    J_c: np.ndarray
     r: np.ndarray
-    J_theta_end: np.ndarray
-    J_s_end: np.ndarray
+    S_theta_end: np.ndarray
+    S_c_end: np.ndarray
     x_end: np.ndarray
     c0: np.ndarray
+
+
+class UnknownsLayout:
+    """Раскладка вектора неизвестных theta_full = [theta; c_1 .. c_T].
+
+    Раньше адресная арифметика («где в theta_full лежит c_j батча b»)
+    повторялась по месту в трёх функциях, причём смещение батча считалось
+    суммированием по interval_managers на каждом вызове. Здесь она одна и
+    строится один раз, в add_batch.
+    """
+
+    def __init__(self, n_theta, n_state):
+        self.n_theta = n_theta
+        self.n_state = n_state
+        self._c_offsets = []      # начало c-блока каждого батча
+        self._n_shoots = []
+        self.n_unknowns = n_theta
+
+    def add_batch(self, n_shoot):
+        """Батч с ФАКТИЧЕСКИМ числом шутов (оно может отличаться от N_shoot)."""
+        self._c_offsets.append(self.n_unknowns)
+        self._n_shoots.append(n_shoot)
+        self.n_unknowns += n_shoot * self.n_state
+
+    @property
+    def theta(self):
+        return slice(0, self.n_theta)
+
+    def c(self, batch, shoot):
+        """Слайс начального состояния шута `shoot` батча `batch`."""
+        start = self._c_offsets[batch] + shoot * self.n_state
+        return slice(start, start + self.n_state)
+
+    def n_shoots(self, batch):
+        return self._n_shoots[batch]
 
 
 class TimeIntervalManager:
@@ -82,15 +125,18 @@ class MultipleShooting:
         self.use_jax = use_jax
         self.verbose = verbose
 
-        # Data storage
+        # Данные батчей и раскладка неизвестных
         self.state_measured_batches = []
         self.t_eval_measurements_batches = []
         self.interval_managers = []
+        self.layout = UnknownsLayout(self.system.n_theta, self.system.nx)
 
     def add_batch(self, state_measured, t_eval_measurements):
+        tm = TimeIntervalManager(self.N_shoot, t_eval_measurements)
         self.state_measured_batches.append(state_measured)
         self.t_eval_measurements_batches.append(t_eval_measurements)
-        self.interval_managers.append(TimeIntervalManager(self.N_shoot, t_eval_measurements))
+        self.interval_managers.append(tm)
+        self.layout.add_batch(tm.N_shoot)
 
 
     def make_full_theta(self, theta0, c0_guess = None, c0_init_method='inverse_h', n_iter=1):
@@ -186,70 +232,53 @@ class MultipleShooting:
         n_state, n_theta, n_obs = self.system.dims()
         if self.gamma is not None and len(self.gamma) != n_obs:
             raise ValueError(f"gamma length must be {n_obs}, got {len(self.gamma)}")
-        idx_theta = slice(0, n_state * n_theta)
-        idx_c = slice(n_state * n_theta, n_state * (n_theta + n_state))
+
         tm = self.interval_managers[batch_idx]
-        n_shoot = tm.N_shoot
-        theta = theta_full[:n_theta]
-
-        intervals = [tm.get_time_interval(sh) for sh in range(n_shoot)]
-
-        # Смещение c-блока данного батча в theta_full: по фактическому числу
-        # шутов предыдущих батчей (оно может отличаться от запрошенного N_shoot)
-        c_offset = n_theta + sum(im.N_shoot for im in self.interval_managers[:batch_idx]) * n_state
+        theta = theta_full[self.layout.theta]
+        intervals = [tm.get_time_interval(sh) for sh in range(tm.N_shoot)]
+        c0_list = [theta_full[self.layout.c(batch_idx, sh)]
+                   for sh in range(tm.N_shoot)]
 
         if self.use_jax:
-            # Все шуты интегрируются батчево (vmap по шутам внутри)
-            c0_list = [theta_full[c_offset + sh * n_state:
-                                  c_offset + (sh + 1) * n_state]
-                       for sh in range(n_shoot)]
-            sols = self.system.get_jacobian_solution_jax_batch(
+            # Все шуты интегрируются одним батчевым вызовом (vmap/потоки внутри)
+            flats = self.system.get_jacobian_solution_jax_batch(
                 c0_list, theta, [ti for ti, _ in intervals])
+        else:
+            flats = [self.system.get_jacobian_solution(c0, theta, ti)
+                     for c0, (ti, _) in zip(c0_list, intervals)]
+
+        # gamma — это sqrt(W): невязка домножается на неё, а стоимость берёт
+        # квадрат, поэтому gamma = 1 означает sigma = 1, а не «вес 1»
+        gamma = self.gamma if self.gamma is not None else np.ones(n_obs)
 
         rows = []
-        for shoot, (t_interval, meas_idx) in enumerate(intervals):
-            start_idx = c_offset + shoot * n_state
-            c0 = theta_full[start_idx: start_idx + n_state]
-
-            if self.use_jax:
-                sol = sols[shoot]
-            else:
-                sol = self.system.get_jacobian_solution(c0, theta, t_interval)
-
-            state_traj = sol[:n_state, :]
-            J_raw = sol[n_state:, :]
-
-            # Столбцы 0..m-1 траектории соответствуют измерениям интервала
-            # (последний столбец — стыковочная точка для непрерывности)
+        for c0, flat, (t_interval, meas_idx) in zip(c0_list, flats, intervals):
+            traj = SensitivityTrajectory.unpack(flat, n_state, n_theta)
+            # Точки 0..m-1 — измерения интервала; последняя точка сетки
+            # стыковочная, в невязку измерений не входит
             m = len(meas_idx)
-            dx_dtheta_all = np.moveaxis(
-                J_raw[idx_theta, :m].reshape(n_state, n_theta, m), 2, 0)   # (m, nx, nθ)
-            dx_dc_all = np.moveaxis(
-                J_raw[idx_c, :m].reshape(n_state, n_state, m), 2, 0)      # (m, nx, nx)
+            meas = traj.head(m)
 
             if self.system.identity_observation:
-                # h(x) = x: dh/dx = I, dh/dθ = 0 — якобианы наблюдения не нужны
-                h_pred = state_traj[:, :m].T
-                J_theta_all = dx_dtheta_all
-                J_c_all = dx_dc_all
+                # h(x) = x: dh/dx = I, dh/dtheta = 0 — якобианы наблюдения не нужны
+                h_pred, J_theta_all, J_c_all = meas.x, meas.S_theta, meas.S_c
             else:
-                h_pred, dh_dx_all, dh_dtheta_all = self.system.observation_batch(
-                    state_traj[:, :m], t_interval[:m], theta)
-                J_theta_all = np.einsum('mij,mjk->mik', dh_dx_all, dx_dtheta_all) + dh_dtheta_all
-                J_c_all = np.einsum('mij,mjk->mik', dh_dx_all, dx_dc_all)
+                h_pred, dh_dx, dh_dtheta = self.system.observation_batch(
+                    meas.x.T, t_interval[:m], theta)
+                J_theta_all = np.einsum('mij,mjk->mik', dh_dx, meas.S_theta) + dh_dtheta
+                J_c_all = np.einsum('mij,mjk->mik', dh_dx, meas.S_c)
 
-            # Веса строк: gamma по компонентам наблюдения,
             # c0_cost — дополнительный вес первой точки интервала
-            W = np.tile(self.gamma if self.gamma is not None else np.ones(n_obs), (m, 1))
+            W = np.tile(gamma, (m, 1))
             W[0] *= self.c0_cost
 
             rows.append(ShootRows(
                 J_theta=W[:, :, None] * J_theta_all,
-                J_s=W[:, :, None] * J_c_all,
+                J_c=W[:, :, None] * J_c_all,
                 r=W * (state_measured[meas_idx] - h_pred),
-                J_theta_end=J_raw[idx_theta, -1].reshape(n_state, n_theta),
-                J_s_end=J_raw[idx_c, -1].reshape(n_state, n_state),
-                x_end=state_traj[:, -1],
+                S_theta_end=traj.S_theta[-1],
+                S_c_end=traj.S_c[-1],
+                x_end=traj.x[-1],
                 c0=c0,
             ))
         return rows
@@ -257,8 +286,8 @@ class MultipleShooting:
     def continuity_rows(self, rows):
         """Строки непрерывности (J_G, R_G) из финальных блоков шутов.
 
-        G_j = x_j(t_{j+1}; c_j, θ) − c_{j+1}: θ-часть — J^(theta)_N шута j,
-        c-часть блочно-бидиагональна (J^(s)_N в колонке шута j, −I в колонке j+1).
+        G_j = x_j(t_{j+1}; c_j, θ) − c_{j+1}: θ-часть — S_theta_end шута j,
+        c-часть блочно-бидиагональна (S_c_end в колонке шута j, −I в колонке j+1).
         """
         n_state, n_theta, _ = self.system.dims()
         n_shoot = len(rows)
@@ -269,9 +298,9 @@ class MultipleShooting:
         R_G = np.concatenate([-(rows[j].x_end - rows[j + 1].c0)
                               for j in range(n_shoot - 1)])
         zeros_col = csr_matrix((n_cont, n_state))
-        lower = hstack([block_diag([r.J_s_end for r in rows[:-1]]), zeros_col])
+        lower = hstack([block_diag([r.S_c_end for r in rows[:-1]]), zeros_col])
         upper = hstack([zeros_col, -speye(n_cont)])
-        J_G = hstack([csr_matrix(np.vstack([r.J_theta_end for r in rows[:-1]])),
+        J_G = hstack([csr_matrix(np.vstack([r.S_theta_end for r in rows[:-1]])),
                       lower + upper], format='csr')
         return J_G, R_G
 
@@ -284,7 +313,7 @@ class MultipleShooting:
         J = hstack([
             csr_matrix(np.vstack([r.J_theta.reshape(-1, r.J_theta.shape[2])
                                   for r in rows])),
-            block_diag([r.J_s.reshape(-1, r.J_s.shape[2]) for r in rows],
+            block_diag([r.J_c.reshape(-1, r.J_c.shape[2]) for r in rows],
                        format='csr'),
         ], format='csr')
         R = np.concatenate([r.r.ravel() for r in rows])

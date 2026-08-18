@@ -9,6 +9,8 @@ from abc import ABC, abstractmethod
 from typing import NamedTuple
 from jaxadi import convert
 
+from commom_utils.sensitivity import group_by_grid_length
+
 
 class Dims(NamedTuple):
     """Размерности задачи. NamedTuple, чтобы работала и распаковка
@@ -41,86 +43,6 @@ class ODESystem:
     
     def get_input_signals(self, t):
         return []
-
-
-class SystemItegrator:
-    def __init__(self, system: ODESystem):
-        # Получаем символьные переменные и выражения
-        state_var, theta_var, inp_signal_var, f = system.get_system()
-        h_observ = system.observation(state_var, theta_var, inp_signal_var)
-
-        # Списки элементов для CasADi функций
-        state_list = state_var.elements()
-        inp_list = inp_signal_var.elements()
-        theta_list = theta_var.elements()
-
-        self.nu = len(inp_list)
-        self.nx = len(state_list)
-        self.n_theta = len(theta_list)
-        self.n_obs = len(h_observ.elements())
-
-
-        self.df_dt = Function('func', [*state_list, *theta_list, *inp_list], [f])
-        self.df_dt_jax = convert(self.df_dt)
-        
-
-        JacA = jacobian(f, vertcat(*state_list))
-        self.jacA = Function('J_a', [*state_list, *theta_list, *inp_list], [JacA])
-        JacB = jacobian(f, vertcat(*inp_list))
-        self.jacB = Function('J_b', [*state_list, *theta_list, *inp_list], [JacB])
-
-        JacD = jacobian(f, vertcat(*theta_list))
-        self.jacD = Function('J_D', [*state_list, *theta_list, *inp_list], [JacD])
-
-
-    def df_dx(self, state, params, u):
-        return np.array(self.df_dt(*[*state, *params, *u])).T[0]
-
-    def df_dx_jax(self, state, t, u, params):
-        return jnp.array(self.df_dt_jax(*state, *params, *u)).flatten()
-
-    def step(self, c0, u, params, dt):
-        assert len(c0) == self.nx
-        assert len(u) == self.nu
-        assert len(params) == self.n_theta
-        system = lambda t, y: self.df_dx(y, params, u)   
-        solution1 = solve_ivp(
-            system,
-            (0, dt),
-            c0,
-            method='RK45' 
-        )
-        return solution1.y.T[-1]
-
-    def step_jax(self, c0, u, params, dt):
-        assert len(c0) == self.nx
-        assert len(u) == self.nu
-        assert len(params) == self.n_theta
-        solution = odeint(self.df_dx_jax, c0, jnp.array([0.0, dt]), u, params)
-        return np.array(solution[-1])
-
-    def integrate(self, c0, u, params, t_span):
-        assert len(c0) == self.nx
-        assert len(u) == self.nu
-        assert len(params) == self.n_theta
-        system = lambda t, y: self.df_dx(y, params, u)   
-        solution1 = solve_ivp(
-            system,
-            t_span,
-            c0,
-            method='RK45' 
-        )
-        return solution1.y.T
-
-
-    def get_lin_system_dynamics(self, state, u, params):
-        assert len(state) == self.nx
-        assert len(u) == self.nu
-        assert len(params) == self.n_theta
-        A = np.array(self.jacA(*state, *u, *params))#[0]
-        B = np.array(self.jacB(*state, *u, *params))#[0]
-        D = np.array(self.jacD(*state, *u, *params))#[0]
-        return A, B, D
 
 
 class SystemJacobian:
@@ -449,13 +371,10 @@ class SystemJacobian:
         get_jacobian_solution_jax для каждого шута.
         """
         theta_j = jnp.array(np.asarray(theta[:self.n_theta], dtype=float))
-        groups = {}
-        for i, ts in enumerate(t_grids):
-            groups.setdefault(len(ts), []).append(i)
 
         results = [None] * len(t_grids)
         integrate = self._vmapped_full_integrator()
-        for idxs in groups.values():
+        for idxs in group_by_grid_length(t_grids):
             ts_stack = jnp.array(np.stack([np.asarray(t_grids[i]) for i in idxs]))
             c0_stack = jnp.array(np.stack([np.asarray(c0_list[i]) for i in idxs]))
             sols = np.array(integrate(c0_stack, ts_stack, theta_j))  # (k, L, dim)
@@ -508,6 +427,74 @@ class SystemJacobian:
         dS = f_x @ jnp.concatenate([S_theta, S_c], axis=1)
         dS_theta = dS[:, :p] + self.df_dtheta_jax(x, t, theta)
         return jnp.concatenate([dx, dS_theta.flatten(), dS[:, p:].flatten()])
+
+
+class SystemIntegrator(SystemJacobian):
+    """Интегрирование с УДЕРЖИВАЕМЫМ входом u, заданным вызывающей стороной.
+
+    Отличие от SystemJacobian: там входы берутся из модели
+    (get_input_signals(t)), а здесь u — аргумент и держится постоянным на
+    шаге. Именно это нужно симуляции MPC: вход выдаёт регулятор, а не модель.
+
+    Раньше это был отдельный класс, целиком повторявший компиляцию CasADi из
+    SystemJacobian, причём с ДРУГИМ порядком аргументов — Function объявлялся
+    как [state, theta, u], а get_lin_system_dynamics звал его как
+    (state, u, theta), то есть подставлял вход в слоты параметров. Теперь
+    функции берутся у родителя, и такой рассинхрон невозможен по построению.
+    """
+
+    def __init__(self, model: ODESystem, method: str = 'RK45'):
+        super().__init__(model, method=method)
+        # Якобиан по входу — единственное, чего нет у родителя
+        state_var, theta_var, inp_var, f = model.get_system()
+        self._f_u_ca = Function(
+            'J_u', [*state_var.elements(), *inp_var.elements(),
+                    *theta_var.elements()],
+            [jacobian(f, vertcat(*inp_var.elements()))])
+
+    def f_of_u(self, state, u, theta):
+        """Правая часть при явно заданном входе u."""
+        return np.array(self._f_ca(*state, *u, *theta)).ravel()
+
+    def f_of_u_jax(self, state, t, u, theta):
+        return jnp.array(self._f_jax_ca(*state, *u, *theta)[0]).flatten()
+
+    def _check(self, c0, u, theta):
+        if not (len(c0) == self.nx and len(u) == self.nu
+                and len(theta) == self.n_theta):
+            raise ValueError(
+                f"ожидалось x({self.nx}), u({self.nu}), theta({self.n_theta}); "
+                f"получено x({len(c0)}), u({len(u)}), theta({len(theta)})")
+
+    def integrate(self, c0, u, theta, t_span):
+        """Траектория на t_span при постоянном u."""
+        self._check(c0, u, theta)
+        sol = solve_ivp(lambda t, y: self.f_of_u(y, u, theta), t_span, c0,
+                        method=self.method)
+        if not sol.success:
+            raise RuntimeError(f"Интегрирование не сошлось: {sol.message}")
+        return sol.y.T
+
+    def step(self, c0, u, theta, dt):
+        """Один шаг длиной dt при постоянном u."""
+        return self.integrate(c0, u, theta, (0.0, dt))[-1]
+
+    def step_jax(self, c0, u, theta, dt):
+        self._check(c0, u, theta)
+        # Допуски НЕ передаём: у odeint по умолчанию 1.4e-8, и симуляция MPC
+        # исторически считалась с ними. Ослаблять их здесь — отдельное решение,
+        # а не побочный эффект рефакторинга (см. RTOL/ATOL для якобианов).
+        sol = odeint(self.f_of_u_jax, jnp.array(c0), jnp.array([0.0, dt]),
+                     u, theta)
+        return np.array(sol[-1])
+
+    def get_lin_system_dynamics(self, state, u, theta):
+        """Линеаризация (A, B, D) = (df/dx, df/du, df/dtheta) в точке."""
+        self._check(state, u, theta)
+        args = (*state, *u, *theta)
+        return (np.array(self._f_x_ca(*args)),
+                np.array(self._f_u_ca(*args)),
+                np.array(self._f_theta_ca(*args)))
 
 
 class SyntheticDataGenerator:

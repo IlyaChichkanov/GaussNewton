@@ -27,6 +27,7 @@ import numpy as np
 import casadi as ca
 
 from commom_utils.ode_system import SystemJacobian
+from commom_utils.sensitivity import group_by_grid_length
 
 
 class RadauTables:
@@ -358,12 +359,10 @@ class CollocationSystemJacobian(SystemJacobian):
     def _march_batch_compiled(self, c0_list, theta, t_grids):
         """Все шуты батча: группировка по длине сетки + потоковый map."""
         nx, n_theta = self.nx, self.n_theta
-        groups = {}
-        for i, g in enumerate(t_grids):
-            groups.setdefault(len(g), []).append(i)
 
         results = [None] * len(t_grids)
-        for n_pts, idxs in groups.items():
+        for idxs in group_by_grid_length(t_grids):
+            n_pts = len(t_grids[idxs[0]])
             n_elems = (n_pts - 1) * self.n_sub
             if len(idxs) == 1 or self.n_threads == 1:
                 for i in idxs:
