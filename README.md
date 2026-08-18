@@ -166,13 +166,22 @@ gauss_newton/
   normal_equations.py  NormalEquations (H, g), накопление, ковариация, CI
   adaptive.py        gn_step и run_optimization_adaptive
   collocation_shooting.py, utils.py
-mhe/ mpc/         MHE и MPC на acados
-experiments/      ноутбуки на реальных данных (сырые CSV в .gitignore)
+mhe/ mpc/         MHE и MPC на acados (кода, ноутбуков здесь больше нет)
+experiments/
+  sintetic_data/  прогоны на синтетике: gauss_newton_test, mhe_test
+  real_data_cars/ прогоны на реальных данных машин (Ceed, Voyah)
+  datasets/       сырые CSV и CAN-логи — вне git, см. datasets/README.md
+  data_utils.py   LogReaderV2, theta_to_physical
 pytests/          тесты
 tools/            nbstrip.py (git-фильтр), setup_repo.sh
 *.ipynb           теория: theory_gauss_newton, collocation,
                   adaptive_regularization, theory_mhe
 ```
+
+Ноутбуки в `experiments/` начинаются с bootstrap-ячейки: она поднимается от
+текущего каталога до `pyproject.toml`, кладёт корень в `sys.path` и задаёт
+`DATASETS` (переопределяется переменной `GN_DATASETS`). Поэтому ноутбук
+одинаково работает и из Jupyter, и при запуске раннером из корня.
 
 **`NOTATION.md` — таблица «теория ↔ код»**: как формула из ноутбука называется
 в коде. Подробная карта модулей и математика — в `CLAUDE.md`.
