@@ -2,7 +2,8 @@ import time
 from dataclasses import dataclass
 
 import numpy as np
-from commom_utils.ode_system import ODESystem, SystemJacobian
+from commom_utils.ode_system import (CompiledModel, ODESystem,
+                                     VariationalIntegrator)
 from commom_utils.sensitivity import SensitivityTrajectory
 from scipy.sparse import (bmat, block_diag, csr_matrix, vstack, hstack,
                           eye as speye)
@@ -123,7 +124,12 @@ class MultipleShooting:
 
     def __init__(self, system: ODESystem, N_shoot: int, gamma: np.ndarray = None,
                  c0_cost: float = 1, use_jax: bool = False, verbose: bool = False):
-        self.system = SystemJacobian(system)
+        # Модель и интегратор разделены: self.system — скомпилированная
+        # модель (f, h, якобианы, наблюдения), self.integrator — способ
+        # получить чувствительности шута. CollocationShooting подменяет
+        # ТОЛЬКО интегратор, модель остаётся общей.
+        self.system = CompiledModel(system)
+        self.integrator = VariationalIntegrator(self.system)
         self.N_shoot = N_shoot
         self.gamma = gamma
         self.c0_cost = c0_cost
@@ -255,10 +261,10 @@ class MultipleShooting:
 
         if self.use_jax:
             # Все шуты интегрируются одним батчевым вызовом (vmap/потоки внутри)
-            flats = self.system.get_jacobian_solution_jax_batch(
+            flats = self.integrator.get_jacobian_solution_jax_batch(
                 c0_list, theta, [ti for ti, _ in intervals])
         else:
-            flats = [self.system.get_jacobian_solution(c0, theta, ti)
+            flats = [self.integrator.get_jacobian_solution(c0, theta, ti)
                      for c0, (ti, _) in zip(c0_list, intervals)]
 
         # gamma — это sqrt(W): невязка домножается на неё, а стоимость берёт

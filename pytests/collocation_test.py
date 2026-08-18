@@ -9,8 +9,9 @@ repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root))
 
 from commom_utils.systems import LotkaVoltera, Attractor
-from commom_utils.ode_system import ODESystem, SyntheticDataGenerator, SystemJacobian
-from commom_utils.collocation import RadauTables, CollocationSystemJacobian
+from commom_utils.ode_system import (ODESystem, SyntheticDataGenerator,
+                                     VariationalIntegrator)
+from commom_utils.collocation import RadauTables, CollocationIntegrator
 from gauss_newton.problem import MultipleShooting
 from gauss_newton.adaptive import run_optimization_adaptive
 from gauss_newton.collocation_shooting import CollocationShooting
@@ -86,11 +87,11 @@ def test_integrator_matches_reference():
     c0 = np.array([6.0, 5.0])
     t_eval = np.linspace(0.0, 4.0, 50)
 
-    ref = SystemJacobian(system)
+    ref = VariationalIntegrator(system)
     ref.ATOL = ref.RTOL = 1e-12
     sol_ref = ref.get_jacobian_solution(c0, theta, t_eval)
 
-    colloc = CollocationSystemJacobian(system, K=3, n_sub=2)
+    colloc = CollocationIntegrator(system, K=3, n_sub=2)
     sol_c = colloc.get_jacobian_solution(c0, theta, t_eval)
 
     assert sol_c.shape == sol_ref.shape
@@ -114,7 +115,7 @@ def test_ind_property():
     t_eval = np.linspace(0.0, 4.0, 30)
     nx, nth = system.nx, system.n_theta
 
-    colloc = CollocationSystemJacobian(system, K=3, n_sub=1)
+    colloc = CollocationIntegrator(system, K=3, n_sub=1)
     sol = colloc.get_jacobian_solution(c0, theta, t_eval)
     S_th = sol[nx:nx + nx * nth, -1].reshape(nx, nth)
     S_c = sol[nx + nx * nth:, -1].reshape(nx, nx)
@@ -154,7 +155,7 @@ def test_stiff_simulation():
     c0 = np.array([1.0])
     t_eval = np.linspace(0.0, 2.0, 21)   # h = 0.1, h*theta = 100
 
-    colloc = CollocationSystemJacobian(system, K=3, n_sub=1)
+    colloc = CollocationIntegrator(system, K=3, n_sub=1)
     x = colloc.get_solution(c0, theta, t_eval)[0]
     exact = np.sin(t_eval) + np.exp(-theta[0] * t_eval)
 

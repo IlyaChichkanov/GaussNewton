@@ -157,7 +157,7 @@ export ACADOS_SOURCE_DIR=<acados>
 
 ```
 commom_utils/
-  ode_system.py      ODESystem, SystemJacobian, SystemIntegrator, генераторы данных
+  ode_system.py      ODESystem, CompiledModel, VariationalIntegrator, SystemIntegrator, генераторы данных
   sensitivity.py     SensitivityTrajectory (x, S_theta, S_c), группировка шутов
   collocation.py     таблицы Радо IIA и коллокационный интегратор
   systems.py         конкретные модели; system_config.py — их конфигурации

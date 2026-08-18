@@ -9,7 +9,7 @@
     - get_derivative даёт ровно nx строк;
     - observation даёт ровно n_obs строк;
     - get_input_signals(t) даёт ровно nu сигналов;
-    - SystemJacobian компилирует f, h и их якобианы.
+    - CompiledModel компилирует f, h и их якобианы.
 
 Тест ловит ровно тот класс ошибок, что был найден в ревью: Pendulum возвращал
 питоновский кортеж, RosenzweigMacArthur объявляла np=1 при шести
@@ -26,7 +26,7 @@ repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root))
 
 from commom_utils import systems as S
-from commom_utils.ode_system import ODESystem, SystemJacobian
+from commom_utils.ode_system import CompiledModel, ODESystem
 
 # Аргументы конструктора для моделей, которым они нужны
 SYSTEM_ARGS = {
@@ -99,7 +99,7 @@ def test_system_dimensions_self_consistent(name, cls):
 
 @pytest.mark.parametrize("name,cls", ALL_SYSTEMS, ids=[n for n, _ in ALL_SYSTEMS])
 def test_system_jacobian_compiles(name, cls):
-    """SystemJacobian строит f, h и якобианы, и они считаются численно."""
+    """CompiledModel строит f, h и якобианы, и они считаются численно."""
     base_system = cls(*SYSTEM_ARGS.get(name, ()))
 
     if (base_system.nu > 0
@@ -116,7 +116,7 @@ def test_system_jacobian_compiles(name, cls):
     else:
         system = base_system
 
-    sj = SystemJacobian(system)
+    sj = CompiledModel(system)
 
     assert sj.dims() == (system.nx, system.n_theta, system.n_obs)
 

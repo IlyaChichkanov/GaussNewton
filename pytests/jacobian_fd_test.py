@@ -81,7 +81,7 @@ def test_jacobian_matches_finite_differences(n_shoot):
                                c0_cost=1.0, use_jax=False)
     # Допуски интегратора жёстче обычных: иначе ошибка solve_ivp (1e-5 по
     # умолчанию) доминирует над разностной производной и сверять нечего
-    problem.system.ATOL = problem.system.RTOL = 1e-12
+    problem.integrator.ATOL = problem.integrator.RTOL = 1e-12
     problem.add_batch(meas, t_meas)
 
     theta_full = problem.make_full_theta(np.array([1.1, 0.45, 0.32, 0.09]))
@@ -110,7 +110,7 @@ def test_jacobian_matches_finite_differences_with_input():
 
     problem = MultipleShooting(system, N_shoot=2, gamma=np.ones(system.n_obs),
                                c0_cost=1.0, use_jax=False)
-    problem.system.ATOL = problem.system.RTOL = 1e-12
+    problem.integrator.ATOL = problem.integrator.RTOL = 1e-12
     problem.add_batch(meas, t_meas)
 
     theta_full = problem.make_full_theta(np.array([0.85]),
@@ -154,7 +154,7 @@ def test_discontinuous_input_degrades_sensitivities():
                                   np.array([3.0, 1.0]), t_end=t_end, n_meas=16)
         problem = MultipleShooting(system, N_shoot=2, gamma=np.ones(2),
                                    c0_cost=1.0, use_jax=False)
-        problem.system.ATOL = problem.system.RTOL = 1e-12
+        problem.integrator.ATOL = problem.integrator.RTOL = 1e-12
         problem.add_batch(meas, t_meas)
         return problem, problem.make_full_theta(theta0)
 
@@ -202,7 +202,7 @@ def test_gradient_matches_finite_differences():
 
     problem = MultipleShooting(system, N_shoot=2, gamma=np.ones(2),
                                c0_cost=1.0, use_jax=False)
-    problem.system.ATOL = problem.system.RTOL = 1e-12
+    problem.integrator.ATOL = problem.integrator.RTOL = 1e-12
     problem.add_batch(meas, t_meas)
     theta_full = problem.make_full_theta(np.array([1.1, 0.45, 0.32, 0.09]))
 

@@ -88,7 +88,7 @@ def _lotka(use_jax):
                               t_end=2.0, n_meas=21)
     problem = MultipleShootingAccum(system, N_shoot=3, gamma=np.ones(2),
                                     c0_cost=1.0, use_jax=use_jax)
-    problem.system.ATOL = problem.system.RTOL = 1e-12
+    problem.integrator.ATOL = problem.integrator.RTOL = 1e-12
     problem.add_batch(meas, t_meas)
     return problem, problem.make_full_theta(np.array([1.1, 0.45, 0.32, 0.09]))
 
@@ -119,7 +119,7 @@ def _case_integrator_obs():
     problem = MultipleShootingAccum(system, N_shoot=2,
                                     gamma=np.ones(system.n_obs),
                                     c0_cost=1.0, use_jax=False)
-    problem.system.ATOL = problem.system.RTOL = 1e-12
+    problem.integrator.ATOL = problem.integrator.RTOL = 1e-12
     problem.add_batch(meas, t_meas)
     return problem, problem.make_full_theta(np.array([0.85]),
                                             c0_init_method='zeros')

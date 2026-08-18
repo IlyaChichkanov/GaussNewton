@@ -12,8 +12,8 @@
 | `x ∈ ℝ^{n_x}` | `x`, `nx` | состояние |
 | `θ ∈ ℝ^{n_θ}` | `theta`, `n_theta` | оцениваемые параметры |
 | `u(t)` | `u`, `nu` | входные сигналы, `ODESystem.get_input_signals` |
-| `f(t, x, θ)` | `SystemJacobian.f` | правая часть ОДУ |
-| `h(x, θ)` | `SystemJacobian.h` | функция измерений, `n_obs` компонент |
+| `f(t, x, θ)` | `CompiledModel.f` | правая часть ОДУ |
+| `h(x, θ)` | `CompiledModel.h` | функция измерений, `n_obs` компонент |
 | `f_x`, `f_θ` | `df_dx`, `df_dtheta` | якобианы правой части |
 | `h_x`, `h_θ` | `dh_dx`, `dh_dtheta` | якобианы наблюдения |
 | `y_i` | `state_measured[i]` | измерение в точке `t_i` |
@@ -66,9 +66,9 @@
 
 | Слой | Файл | Отвечает за |
 |---|---|---|
-| модель | `commom_utils/ode_system.py` | `ODESystem`, `SystemJacobian`, `SystemIntegrator` |
+| модель | `commom_utils/ode_system.py` | `ODESystem`, `CompiledModel`, `VariationalIntegrator`, `SystemIntegrator` |
 | чувствительности | `commom_utils/sensitivity.py` | `SensitivityTrajectory`, `group_by_grid_length` |
-| коллокации | `commom_utils/collocation.py` | `RadauTables`, `CollocationSystemJacobian` |
+| коллокации | `commom_utils/collocation.py` | `RadauTables`, `CollocationStepFunctions`, `CollocationIntegrator` |
 | сборка задачи | `gauss_newton/problem.py` | `ShootRows`, `UnknownsLayout`, `MultipleShooting` |
 | нормальные уравнения | `gauss_newton/normal_equations.py` | `NormalEquations`, накопление `H`/`g`, ковариация, CI |
 | оптимизация | `gauss_newton/adaptive.py` | `gn_step`, `run_optimization_adaptive` |
