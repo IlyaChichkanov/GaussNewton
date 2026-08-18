@@ -9,8 +9,7 @@ sys.path.insert(0, str(repo_root))
 
 from commom_utils.systems import LotkaVoltera, Attractor
 from commom_utils.ode_system import SyntheticDataGenerator
-from gauss_newton.gauss_newton_math import (MultipleShooting,
-                                            compute_parameter_covariance)
+from gauss_newton.problem import MultipleShooting
 from gauss_newton.adaptive import gn_step, run_optimization_adaptive
 from gauss_newton.normal_equations import (NormalEquations,
                                            MultipleShootingAccum,
@@ -122,8 +121,10 @@ def test_covariance_matches_dense():
     n_theta = len(config["true_params"])
 
     J, R, J_G, R_G = prob.solve(theta_full)
-    cov_ref, sigma2_ref, dof_ref = compute_parameter_covariance(
-        J, R, J_G, R_G, n_theta)
+    # Эталон — та же формула, но из построенной J (NormalEquations.from_jacobian
+    # сохранена именно как эталонная сборка, в цикле оптимизации не участвует)
+    cov_ref, sigma2_ref, dof_ref = NormalEquations.from_jacobian(
+        J, R, J_G, R_G).covariance_theta(n_theta)
     cov, sigma2, dof = prob.normal_equations(theta_full).covariance_theta(n_theta)
 
     assert dof == dof_ref

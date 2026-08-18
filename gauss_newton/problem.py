@@ -3,9 +3,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from commom_utils.ode_system import ODESystem, SystemJacobian
-from scipy.sparse import block_diag, csr_matrix, vstack, hstack, eye as speye, diags
-from scipy.sparse.linalg import spsolve, splu
-from scipy import stats
+from scipy.sparse import block_diag, csr_matrix, vstack, hstack, eye as speye
 
 
 @dataclass
@@ -138,7 +136,7 @@ class MultipleShooting:
         if not jacobians:
             raise ValueError("At least one batch Jacobian is required")
 
-        _, n_theta, _ = self.system.get_dimentions()
+        _, n_theta, _ = self.system.dims()
         theta_blocks = [jacobian[:, :n_theta] for jacobian in jacobians]
         c0_blocks = [jacobian[:, n_theta:] for jacobian in jacobians]
 
@@ -185,7 +183,7 @@ class MultipleShooting:
         складывает из этих блоков разреженную J, а накопительный путь
         (`gauss_newton/normal_equations.py`) сразу сворачивает их в H и g.
         """
-        n_state, n_theta, n_obs = self.system.get_dimentions()
+        n_state, n_theta, n_obs = self.system.dims()
         if self.gamma is not None and len(self.gamma) != n_obs:
             raise ValueError(f"gamma length must be {n_obs}, got {len(self.gamma)}")
         idx_theta = slice(0, n_state * n_theta)
@@ -262,7 +260,7 @@ class MultipleShooting:
         G_j = x_j(t_{j+1}; c_j, θ) − c_{j+1}: θ-часть — J^(theta)_N шута j,
         c-часть блочно-бидиагональна (J^(s)_N в колонке шута j, −I в колонке j+1).
         """
-        n_state, n_theta, _ = self.system.get_dimentions()
+        n_state, n_theta, _ = self.system.dims()
         n_shoot = len(rows)
         n_cont = (n_shoot - 1) * n_state
         if n_cont == 0:
@@ -278,7 +276,7 @@ class MultipleShooting:
         return J_G, R_G
 
     def _solve_batch(self, theta_full, state_measured, t_meas, batch_idx):
-        _, _, n_obs = self.system.get_dimentions()
+        _, _, n_obs = self.system.dims()
         rows = self.shoot_rows(theta_full, state_measured, t_meas, batch_idx)
 
         # Плотные блоки якобиана: θ-часть общая для всех строк, c-часть
@@ -295,173 +293,3 @@ class MultipleShooting:
         return J, J_G, R, R_G
 
 
-def compute_parameter_covariance(J, R, J_G, R_G, n_theta):
-    """Маргинальная ковариация θ по полной системе невязок.
-
-    Согласно теории (theory_gauss_newton.ipynb): J_full = [J_meas; J_cont],
-    R_full = [R_meas; R_cont], Cov(p) = σ² (J_fullᵀ J_full)⁻¹, dof = n_rows − n_params.
-    Возвращается θ-блок обратной матрицы (Шур-комплемент по блоку начальных
-    состояний), т.е. корреляция θ с c_j учитывается, а не отбрасывается.
-    """
-    if J_G is not None and J_G.shape[0] > 0:
-        J_full = vstack([J, J_G], format='csr')
-        R_full = np.concatenate([R, R_G])
-    else:
-        J_full = J.tocsr()
-        R_full = R
-
-    n_rows, n_params = J_full.shape
-    residual_sum_squares = float(R_full @ R_full)
-    dof = max(n_rows - n_params, 1)
-    sigma2 = residual_sum_squares / dof
-
-    H_reg = (J_full.T @ J_full + 1e-8 * speye(n_params)).tocsc()
-    # θ-блок обратной матрицы: решаем H X = E_θ вместо явного обращения
-    rhs = np.zeros((n_params, n_theta))
-    rhs[:n_theta, :] = np.eye(n_theta)
-    try:
-        solve = splu(H_reg).solve
-        X = solve(rhs)
-    except RuntimeError:
-        X = np.linalg.pinv(H_reg.toarray()) @ rhs
-    cov_theta = sigma2 * X[:n_theta, :]
-    return cov_theta, sigma2, dof
-
-def confidence_intervals(theta_opt, cov, dof, alpha=0.05):
-    se = np.sqrt(np.diag(cov))
-    t_crit = stats.t.ppf(1 - alpha/2, df=dof)
-    ci_low = theta_opt - t_crit * se
-    ci_high = theta_opt + t_crit * se
-    return ci_low, ci_high
-
-def compute_delta_gn(J, R, J_G, R_G, mu, lambda_, lambda_reg, theta_full, mu_dec):
-    multiple_shooting = J_G.shape[0] > 0
-    n_params = len(theta_full)
-    if multiple_shooting:
-        H = J.T @ J   # csr
-        reg_theta = lambda_reg * speye(n_params) + lambda_ * diags(H.diagonal())
-        top = hstack([H + reg_theta, J_G.T])
-        n_cont = J_G.shape[0]
-        bottom = hstack([J_G, -mu * speye(n_cont)])
-        H_full = vstack([top, bottom]).tocsr()     # ← преобразовать в CSR
-        rhs = np.concatenate([J.T @ R, R_G])
-        delta = spsolve(H_full, rhs)
-        delta_theta = delta[:n_params]
-        new_mu = mu * mu_dec
-    else:
-        H = J.T @ J
-        H_reg = (H + 1e-8 * speye(n_params)).tocsr()   # ← преобразовать в CSR
-        rhs = J.T @ R
-        delta_theta = spsolve(H_reg, rhs)
-        new_mu = mu
-    return delta_theta, new_mu
-
-def run_optimization(problem, config, theta_full, system, verbose=True):
-    """Старый цикл ГН с ручным расписанием mu (config.mu, config.mu_dec).
-
-    Оставлен как эталон для сравнения (бенч-ячейки, старые ноутбуки) и не
-    развивается. Для новой работы используйте
-    gauss_newton.adaptive.run_optimization_adaptive: mu и lambda подбираются
-    сами, есть автоматическая остановка (этот цикл всегда делает все n_iter
-    итераций). ВНИМАНИЕ: интерфейсы разные — этот возвращает кортеж из шести
-    элементов, адаптивный возвращает (theta_full, hist-словарь).
-    """
-    theta_hist = [theta_full[:].copy()]
-    r_meas_hist = []
-    r_cont_hist = []
-    ci_low_hist = []
-    ci_high_hist = []
-    consecutive_failures = 0
-    mu = config.mu
-    n_theta = system.np
-
-    # Минимально допустимое mu (можно задать в config, иначе 1e-6)
-    mu_min = getattr(config, 'mu_min', 1e-6)
-
-    # Начальные невязки для сравнения
-    try:
-        J, R, J_G, R_G = problem.solve(theta_full)
-    except RuntimeError as exc:
-        raise RuntimeError(
-            "Интегратор не справился в НАЧАЛЬНОЙ точке theta0 (до первого шага "
-            "ГН). Для коллокаций: увеличьте n_sub (мельче элементы), ослабьте "
-            "newton_tol или поднимите newton_maxiter, либо выберите более "
-            f"правдоподобное theta0. Исходная ошибка: {exc}") from exc
-    best_cost = np.sum(R**2) + np.sum(R_G**2)  # полная стоимость
-    if verbose:
-        print(f'  J nnz: {J.nnz}, J_G nnz: {J_G.nnz}')
-    for it in range(config.n_iter):
-        iter_start = time.time()
-
-        # Логирование текущей стоимости
-        meas_cost = np.sum(R**2) / max(1, len(R))
-        cont_cost = np.sum(R_G**2) / max(1, len(R_G)) if R_G.size > 0 else 0.0
-        if verbose:
-            print(f'Iter {it:3d} | R_meas: {meas_cost:.3e} | R_cont: {cont_cost:.3e} | mu: {mu:.2e}')
-
-        # Ковариация и доверительные интервалы (на текущих J, R)
-        cov_theta, _, dof = compute_parameter_covariance(J, R, J_G, R_G, n_theta)
-        ci_low_theta, ci_high_theta = confidence_intervals(theta_full[:n_theta], cov_theta, dof, alpha=0.05)
-        ci_low_hist.append(ci_low_theta)
-        ci_high_hist.append(ci_high_theta)
-
-        delta_theta, new_mu = compute_delta_gn(
-            J, R, J_G, R_G, mu,
-            config.lambda_, config.lambda_reg,
-            theta_full, config.mu_dec
-        )
-
-        theta_trial = theta_full + delta_theta
-
-        # Проверяем на NaN в параметрах
-        if np.any(np.isnan(theta_trial)):
-            # Печатается независимо от verbose: расходимость не должна пройти молча
-            print("NaN в параметрах, остановка.")
-            break
-
-
-        try:
-            J_trial, R_trial, J_G_trial, R_G_trial = problem.solve(theta_trial)
-            trial_cost = np.sum(R_trial**2) + np.sum(R_G_trial**2)
-        except RuntimeError:
-            # Интегратор не справился в пробной точке (например, Ньютон
-            # коллокаций не сошёлся) — отклонённый шаг, а не фатальная ошибка
-            trial_cost = np.inf
-
-        # Принимаем шаг только если стоимость уменьшилась (или не изменилась)
-        if not np.isnan(trial_cost) and trial_cost <= best_cost*1.1:
-            # Успех: применяем новые параметры и обновляем mu (но не ниже mu_min)
-            theta_full = theta_trial
-            best_cost = trial_cost
-            J, R, J_G, R_G = J_trial, R_trial, J_G_trial, R_G_trial
-            mu = max(new_mu, mu_min)   # не даём mu упасть слишком низко
-            consecutive_failures = 0
-        else:
-            # Шаг плохой: откатываем, mu оставляем прежним
-            if verbose:
-                print(f"  Шаг отклонён (cost {trial_cost:.3e} > {best_cost:.3e}), mu сохранён {mu:.2e}")
-            # mu не меняется, оставляем старые J, R и theta_full
-            consecutive_failures += 1
-            mu = max(mu /config.mu_dec, mu_min)
-            if consecutive_failures >= 3:
-                if verbose:
-                    print(f"  Остановка после {consecutive_failures} неудачных шагов подряд")
-                break
-        # Сохраняем историю (текущие theta_full и невязки)
-        theta_hist.append(theta_full.copy())
-        r_meas_hist.append(meas_cost)
-        r_cont_hist.append(cont_cost)
-
-        # Если mu достиг минимума и улучшений нет, можно остановиться
-        if mu <= mu_min and trial_cost > best_cost:
-            if verbose:
-                print("mu достиг нижней границы, улучшений нет – остановка.")
-            break
-
-        if verbose:
-            print(f'  Iter time: {time.time() - iter_start:.3f}s')
-
-    ci_low_hist = np.array(ci_low_hist)
-    ci_high_hist = np.array(ci_high_hist)
-
-    return theta_hist, r_meas_hist, r_cont_hist, theta_full, ci_low_hist, ci_high_hist

@@ -20,7 +20,7 @@ class MheModel(ABC):
         self.system = system
         self.state_length = system.nx
         self.input_length = system.nu
-        self.param_length = system.np
+        self.param_length = system.n_theta
         self.obs_length = system.n_obs
 
     def continuous_dynamics(self, state, params, noise, input_signals) -> SX:

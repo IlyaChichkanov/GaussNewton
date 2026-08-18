@@ -13,7 +13,7 @@ differentiation, точные производные дискретной схе
 CollocationSystemJacobian — drop-in замена SystemJacobian: переопределены
 только методы интегрирования, контракт выхода (layout строк
 [x; J_theta.flatten(); J_c.flatten()]) сохранён, поэтому MultipleShooting,
-run_optimization и plot_solution работают без изменений.
+run_optimization_adaptive и plot_solution работают без изменений.
 
 Несходимость Ньютона НЕ бросает исключений внутри CasADi (error_on_fail
 отключён — иначе C++ печатает многострочные дампы входов): каждый элемент
@@ -99,10 +99,10 @@ class CollocationSystemJacobian(SystemJacobian):
     # не должна превышать RES_SAFETY * newton_tol (запас на остановку по шагу)
     RES_SAFETY = 10.0
 
-    def __init__(self, f_sym, K=3, n_sub=1, newton_tol=1e-10, newton_maxiter=25,
+    def __init__(self, model, K=3, n_sub=1, newton_tol=1e-10, newton_maxiter=25,
                  rootfinder_plugin='newton', rootfinder_options=None,
                  n_threads=None, method='RK45'):
-        super().__init__(f_sym, method=method)
+        super().__init__(model, method=method)
         if int(n_sub) < 1:
             raise ValueError(f"n_sub={n_sub}: должно быть >= 1")
         if float(newton_tol) <= 0:
@@ -135,7 +135,7 @@ class CollocationSystemJacobian(SystemJacobian):
         """Столбец выхода в контракте SystemJacobian.
 
         Layout (C-order): [x (nx); J_theta.flatten() (nx*np); J_c.flatten()
-        (nx*nx)] — ровно то, что ждут make_full_system / shoot_rows.
+        (nx*nx)] — ровно то, что ждёт SensitivityTrajectory.unpack.
         """
         return np.concatenate([np.asarray(x, float), S_th.ravel(), S_c.ravel()])
 
@@ -147,7 +147,7 @@ class CollocationSystemJacobian(SystemJacobian):
         Gamma_all: (n_elems, nx, np). Точки t_eval — концы каждого n_sub-го
         элемента, поэтому столбец пишется раз в n_sub элементов.
         """
-        nx, n_theta = self.nx, self.np
+        nx, n_theta = self.nx, self.n_theta
         out = np.zeros((nx + nx * n_theta + nx * nx, n_pts))
         S_th = np.zeros((nx, n_theta))
         S_c = np.eye(nx)
@@ -181,7 +181,7 @@ class CollocationSystemJacobian(SystemJacobian):
         else:
             try:
                 # Быстрый путь: get_input_signals векторизован по времени
-                sigs = self.f_sym.get_input_signals(flat_t)
+                sigs = self.model.get_input_signals(flat_t)
                 inp = np.array([np.asarray(s, dtype=float).reshape(flat_t.size)
                                 for s in sigs]).T
             except Exception:
@@ -202,7 +202,7 @@ class CollocationSystemJacobian(SystemJacobian):
         if self._step_fns is not None:
             return self._step_fns
 
-        K, nx, n_theta, nu = self.colloc.K, self.nx, self.np, self.nu
+        K, nx, n_theta, nu = self.colloc.K, self.nx, self.n_theta, self.nu
 
         z = ca.MX.sym('z', K * nx)
         x_prev = ca.MX.sym('x_prev', nx)
@@ -210,13 +210,13 @@ class CollocationSystemJacobian(SystemJacobian):
         u_flat = ca.MX.sym('u_flat', K * nu)
         h = ca.MX.sym('h')
 
-        # F(z): правая часть во всех стадиях (SX-функция res_f на MX-аргументах)
+        # F(z): правая часть во всех стадиях (SX-функция _f_ca на MX-аргументах)
         F_stages = []
         for k in range(K):
             xk = [z[k * nx + i] for i in range(nx)]
             uk = [u_flat[k * nu + j] for j in range(nu)]
             th = [theta[i] for i in range(n_theta)]
-            F_stages.append(self.res_f(*xk, *uk, *th))
+            F_stages.append(self._f_ca(*xk, *uk, *th))
         F = ca.vcat(F_stages)
 
         # Резидуал стадийных уравнений: Phi = z - A x_prev - h (B (x) I) F(z)
@@ -298,7 +298,7 @@ class CollocationSystemJacobian(SystemJacobian):
         Gamma. Возвращает (x_all (nx, n_elems), Psi_all (n_elems, nx, nx),
         Gamma_all (n_elems, nx, np)).
         """
-        nx, n_theta = self.nx, self.np
+        nx, n_theta = self.nx, self.n_theta
         x_all = np.asarray(x_stack)
         Psi_all = np.asarray(Psi_stack).reshape(nx, n_elems, nx).transpose(1, 0, 2)
         Gamma_all = np.asarray(Gamma_stack).reshape(nx, n_elems, n_theta) \
@@ -357,7 +357,7 @@ class CollocationSystemJacobian(SystemJacobian):
 
     def _march_batch_compiled(self, c0_list, theta, t_grids):
         """Все шуты батча: группировка по длине сетки + потоковый map."""
-        nx, n_theta = self.nx, self.np
+        nx, n_theta = self.nx, self.n_theta
         groups = {}
         for i, g in enumerate(t_grids):
             groups.setdefault(len(g), []).append(i)
@@ -401,9 +401,9 @@ class CollocationSystemJacobian(SystemJacobian):
         """Нормализация входов + вырожденные сетки + запуск марша."""
         c0 = np.asarray(c0, dtype=float)
         t_eval = np.asarray(t_eval, dtype=float)
-        theta = np.asarray(theta, dtype=float)[:self.np]
+        theta = np.asarray(theta, dtype=float)[:self.n_theta]
         if len(t_eval) < 2:                    # нет ни одного элемента
-            nx, n_theta = self.nx, self.np
+            nx, n_theta = self.nx, self.n_theta
             if with_sens:
                 out = np.zeros((nx + nx * n_theta + nx * nx, len(t_eval)))
                 if len(t_eval) == 1:
@@ -431,7 +431,7 @@ class CollocationSystemJacobian(SystemJacobian):
         return self._march(c0, theta, t_eval, with_sens=True)
 
     def get_jacobian_solution_jax_batch(self, c0_list, theta, t_grids):
-        theta = np.asarray(theta, dtype=float)[:self.np]
+        theta = np.asarray(theta, dtype=float)[:self.n_theta]
         return self._march_batch_compiled(c0_list, theta, t_grids)
 
     def get_solution_jax(self, c0, theta, t_eval):

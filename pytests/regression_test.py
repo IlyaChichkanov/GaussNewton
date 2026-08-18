@@ -16,7 +16,7 @@ J, R, J_G, R_G (плотная сборка), H, g (накопление), delta
 Четыре случая покрывают все ветки, которых касается рефакторинг:
 
     lv_scipy        вариационные уравнения через solve_ivp (numpy-ветка)
-    lv_jax          те же уравнения через jax odeint (make_full_system_jax)
+    lv_jax          те же уравнения через jax odeint (_variational_rhs_jax)
     lv_colloc       коллокации Радо IIA + IND (свой марш, свои рекурсии)
     integrator_obs  НЕтождественное наблюдение h = x_0 и вход u(t)
                     (ветка observation_batch: dh/dx, dh/dtheta)

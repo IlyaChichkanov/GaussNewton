@@ -15,7 +15,7 @@ class MpcModel(ABC):
         self.system = system
         self.state_length = system.nx
         self.input_length = system.nu
-        self.param_length = system.np
+        self.param_length = system.n_theta
         self.obs_length = system.n_obs
 
     def make_sym_variables(self) -> tuple[SX]:
@@ -139,7 +139,7 @@ class KinematicModel(ODESystem):
     def __init__(self, car_params: CarParams):
         self.gear_ratio = car_params.gear_ratio
         self.wheelbase = car_params.wheelbase
-        super().__init__(nx=2, np=1, nu=3)
+        super().__init__(nx=2, n_theta=1, nu=3)
 
     def get_derivative(self, state, inp_signals, params) -> SX:
         rwa_cmd, v, c = inp_signals[0], inp_signals[1], inp_signals[2]
@@ -157,7 +157,7 @@ class KinematicModel2dIntegrator(ODESystem):
     def __init__(self, car_params: CarParams):
         self.gear_ratio = car_params.gear_ratio
         self.wheelbase = car_params.wheelbase
-        super().__init__(nx=4, np=1, nu=3)
+        super().__init__(nx=4, n_theta=1, nu=3)
 
     def get_derivative(self, state, inp_signals, params) -> SX:
         ddu_cmd, v, c = inp_signals[0], inp_signals[1], inp_signals[2]
@@ -179,9 +179,9 @@ class KinematicModel2dIntegratorWithDelay(ODESystem):
         self.delay = DelaySystem(order=delay_order)
         # Состояния: tau, psi, rwa, rwa_dot + состояния задержки
         nx_total = 4 + self.delay.nx
-        np_total = 1 + self.delay.np   # offset + tau_d
+        np_total = 1 + self.delay.n_theta   # offset + tau_d
         nu_total = 3                   # ddu_cmd, v, c
-        super().__init__(nx=nx_total, np=np_total, nu=nu_total)
+        super().__init__(nx=nx_total, n_theta=np_total, nu=nu_total)
 
     def get_derivative(self, state, inp_signals, params):
         tau = state[0]

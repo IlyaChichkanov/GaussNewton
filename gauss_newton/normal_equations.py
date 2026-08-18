@@ -20,7 +20,7 @@
     h_x, h_theta                dh_dx, dh_dtheta     якобианы наблюдения
     r_i = y_i - h(x_i, theta)   ShootRows.r          невязка (в коде уже взвешена)
     J_i строка = [h_x J^(theta)_i + h_theta | h_x J^(s)_i]
-                                ShootRows.J_theta,   (см. gauss_newton_math.ShootRows)
+                                ShootRows.J_theta,   (см. gauss_newton.problem.ShootRows)
                                 ShootRows.J_s
     H^(theta), H^(theta s), H^(s)  H_theta, H_theta_s, H_s   блоки H
     g                           g_theta, g_s         блоки градиента
@@ -37,10 +37,11 @@
 from dataclasses import dataclass
 
 import numpy as np
+from scipy import stats
 from scipy.sparse import bmat, csr_matrix, vstack, eye as speye
 from scipy.sparse.linalg import splu
 
-from gauss_newton.gauss_newton_math import MultipleShooting
+from gauss_newton.problem import MultipleShooting
 from gauss_newton.collocation_shooting import CollocationShooting
 
 
@@ -74,7 +75,7 @@ class NormalEquations:
         return float(self.R_G @ self.R_G) if self.R_G.size else 0.0
 
     def cost(self):
-        """||r||^2 + ||R_G||^2 — стоимость, сравнимая с run_optimization."""
+        """||r||^2 + ||R_G||^2 — полная стоимость (обе группы невязок)."""
         return self.rss + self.cont_sq()
 
     def merit(self, mu):
@@ -93,7 +94,7 @@ class NormalEquations:
                      / max(self.H.diagonal().sum(), 1e-300))
 
     def covariance_theta(self, n_theta, ridge=1e-8):
-        """Маргинальная ковариация theta — как compute_parameter_covariance, но из H.
+        """Маргинальная ковариация theta прямо из H, без построения J.
 
         J_full = [J; J_G], J_full^T J_full = H + J_G^T J_G; возвращается
         theta-блок обратной матрицы (Шур-комплемент по блоку c).
@@ -117,7 +118,7 @@ class AccumulateMixin:
     """Собирает H и g накоплением по измерениям — большая J не строится."""
 
     def normal_equations(self, theta_full):
-        n_state, n_theta, _ = self.system.get_dimentions()
+        n_state, n_theta, _ = self.system.dims()
         H_theta = np.zeros((n_theta, n_theta))   # документ: H^(theta)
         g_theta = np.zeros(n_theta)              # документ: g, theta-часть
         H_theta_s, H_s, g_s = [], [], []         # по одному блоку на шут
@@ -175,3 +176,15 @@ def normal_equations_of(problem, theta_full):
     if hasattr(problem, 'normal_equations'):
         return problem.normal_equations(theta_full)
     return NormalEquations.from_jacobian(*problem.solve(theta_full))
+
+
+def confidence_intervals(theta_opt, cov, dof, alpha=0.05):
+    """Двусторонние доверительные интервалы по t-распределению Стьюдента.
+
+    Живёт рядом с ковариацией (covariance_theta), которая их и питает:
+    se_i = sqrt(Cov_ii), CI_i = theta_i +- t_{alpha/2, dof} * se_i.
+    Вывод — theory_gauss_newton.ipynb, раздел «Доверительные интервалы».
+    """
+    se = np.sqrt(np.diag(cov))
+    t_crit = stats.t.ppf(1 - alpha / 2, df=dof)
+    return theta_opt - t_crit * se, theta_opt + t_crit * se

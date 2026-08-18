@@ -64,12 +64,12 @@ def test_system_dimensions_self_consistent(name, cls):
 
     # Размерности объявлены положительными и целыми
     assert system.nx >= 1, f"{name}: nx={system.nx}"
-    assert system.np >= 1, f"{name}: np={system.np}"
+    assert system.n_theta >= 1, f"{name}: n_theta={system.n_theta}"
     assert system.nu >= 0, f"{name}: nu={system.nu}"
     assert system.n_obs >= 1, f"{name}: n_obs={system.n_obs}"
 
     x = ca.SX.sym("x", system.nx)
-    theta = ca.SX.sym("theta", system.np)
+    theta = ca.SX.sym("theta", system.n_theta)
     u = ca.SX.sym("u", system.nu)
 
     # Правая часть: ровно nx компонент.
@@ -118,23 +118,23 @@ def test_system_jacobian_compiles(name, cls):
 
     sj = SystemJacobian(system)
 
-    assert sj.get_dimentions() == (system.nx, system.np, system.n_obs)
+    assert sj.dims() == (system.nx, system.n_theta, system.n_obs)
 
     # Численный вызов в неособой точке. Ни нули, ни единицы не годятся:
     # нули делят на vx/tau, а единицы обнуляют знаменатель 1 - c*d
     # у KinematicBycicleErrors. 0.1 по состоянию и 0.5 по параметрам
     # держат все знаменатели моделей вдали от нуля.
     state = 0.1 * np.ones(system.nx)
-    theta = 0.5 * np.ones(system.np)
+    theta = 0.5 * np.ones(system.n_theta)
     t = 0.5
 
-    f_val = sj.f_x_theta(state, t, theta)
+    f_val = sj.f(state, t, theta)
     assert f_val.shape == (system.nx,)
     assert np.all(np.isfinite(f_val)), f"{name}: f не конечна"
 
-    h_val = sj.h_x(state, t, theta)
+    h_val = sj.h(state, t, theta)
     assert h_val.shape == (system.n_obs,)
 
     assert sj.df_dx(state, t, theta).shape == (system.nx, system.nx)
-    assert sj.df_dtheta(state, t, theta).shape == (system.nx, system.np)
+    assert sj.df_dtheta(state, t, theta).shape == (system.nx, system.n_theta)
     assert sj.dh_dx(state, t, theta).shape == (system.n_obs, system.nx)

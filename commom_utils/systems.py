@@ -42,7 +42,7 @@ def get_interpolation_symbolic(x_grid, x, name='y_values'):
 
 class Pendulum(ODESystem):
     def __init__(self, order=1):
-        super().__init__(nx=4, np=3, nu=1)
+        super().__init__(nx=4, n_theta=3, nu=1)
 
     def get_derivative(self, state, theta, u):
         g = 10
@@ -71,9 +71,9 @@ class DelayOffset(ODESystem):
         self.order = order
         self.delay = DelaySystem(order=order)
         nx_total = 0 + self.delay.nx
-        np_total = 1 + self.delay.np   # offset + tau_d
+        np_total = 1 + self.delay.n_theta   # offset + tau_d
         nu_total = 1
-        super().__init__(nx=nx_total, np=np_total, nu=nu_total)
+        super().__init__(nx=nx_total, n_theta=np_total, nu=nu_total)
 
     def get_derivative(self, state, theta, u):
         return self.delay.get_derivative(state, theta, u)
@@ -86,9 +86,9 @@ class DelaySystem(ODESystem):
     def __init__(self, order=1):
         self.order = order
         if order == 1:
-            super().__init__(nx=1, np=1, nu=1)
+            super().__init__(nx=1, n_theta=1, nu=1)
         else:
-            super().__init__(nx=2, np=1, nu=1)
+            super().__init__(nx=2, n_theta=1, nu=1)
 
     def get_derivative(self, state, theta, u):
         tau = theta[0]
@@ -181,7 +181,7 @@ class Attractor(ODESystem):
 
 class OscillatorModel(ODESystem):
     def __init__(self):
-        super().__init__(nx=2, nu=0, np=2)
+        super().__init__(nx=2, nu=0, n_theta=2)
 
    
     def get_derivative(self, state, params, input_signals):
@@ -197,7 +197,7 @@ class OscillatorModel(ODESystem):
 class MassSpringDamper(ODESystem):
     def __init__(self, m = 1):
         self.mass = m
-        super().__init__(nx=2, nu=1, np=2)
+        super().__init__(nx=2, nu=1, n_theta=2)
 
    
     def get_derivative(self, state, params, input_signals):
@@ -221,7 +221,7 @@ class MassSpringDamper(ODESystem):
 class KinematicBycicleErrors(ODESystem):
     def __init__(self, wheelbase):
         self.wheelbase = wheelbase
-        super().__init__(nx=2, nu=1, np=2)
+        super().__init__(nx=2, nu=1, n_theta=2)
         
     def get_derivative(self, state, params, input_signals):
         d = state[0]
@@ -240,7 +240,7 @@ class KinematicModel(ODESystem):
         np = 1
         if (use_offset):
             np += 1
-        super().__init__(nx=1, np=np, nu=3)
+        super().__init__(nx=1, n_theta=np, nu=3)
 
     def get_derivative(self, state, params, input_signals):
         psi = state[0]
@@ -274,7 +274,7 @@ class OffsetEstimator(ODESystem):
     def __init__(self, wheelbase, gear_ratio):
         self.wheelbase = wheelbase
         self.GR = 1/gear_ratio
-        super().__init__(nx=1, nu=2, np=1)
+        super().__init__(nx=1, nu=2, n_theta=1)
 
     def get_derivative(self, state, params, input_signals):
         offset = params[0]
@@ -294,7 +294,7 @@ class OffsetEstimator(ODESystem):
 
 class KinematicBycicleActuator(ODESystem):
     def __init__(self, wheelbase, kp = 80.9, kv = 80.61):
-        super().__init__(nx=3, nu=2, np=2)
+        super().__init__(nx=3, nu=2, n_theta=2)
         self.wheelbase = wheelbase
         self.kp = kp
         self.kv = kv
@@ -324,9 +324,9 @@ class KinematicModelDelay(ODESystem):
 
         self.delay = DelaySystem(order=order)
         nx_total = 1 + self.delay.nx
-        np_total = 2 + self.delay.np  
+        np_total = 2 + self.delay.n_theta  
         nu_total = 2                
-        super().__init__(nx=nx_total, np=np_total, nu=nu_total)
+        super().__init__(nx=nx_total, n_theta=np_total, nu=nu_total)
 
     def get_derivative(self, state, params, input_signals):
         psi = state[0]
@@ -360,7 +360,7 @@ class KinematicModelDelay(ODESystem):
 class RosenzweigMacArthur(ODESystem):
     def __init__(self):
         # get_derivative распаковывает 6 параметров: r, K, a, h, e, m
-        super().__init__(nx=2, nu=0, np=6)
+        super().__init__(nx=2, nu=0, n_theta=6)
 
    
     def get_derivative(self, state, params, input_signals):
@@ -397,7 +397,7 @@ class Quadrotor2D(ODESystem):
     """
 
     def __init__(self):
-        super().__init__(nx=6, nu=1, np=1)
+        super().__init__(nx=6, nu=1, n_theta=1)
 
     def get_derivative(self, state, params, input_signals):
         # Распаковка состояния
@@ -437,7 +437,7 @@ class Quadrotor2D(ODESystem):
 class Integrator(ODESystem):
 
     def __init__(self):
-        super().__init__(nx=2, nu=1, np=1)
+        super().__init__(nx=2, nu=1, n_theta=1)
 
     def get_derivative(self, state, params, input_signals):
         # Распаковка состояния
