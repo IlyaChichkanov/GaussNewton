@@ -367,6 +367,11 @@ def plot_solution(
                     line_color=color,
                     opacity=0.7,
                     row=current_row, col=1,
+                    # Панель адресована явно, и данные в ней есть, поэтому
+                    # отсев пустых сабплотов не нужен. Он ещё и ломается:
+                    # проверка читает trace.xaxis у КАЖДОГО трейса фигуры,
+                    # а у Scatter3d (3D-траектория) такого свойства нет
+                    exclude_empty_subplots=False,
                 )
         # Обновление меток осей
         fig.update_xaxes(title_text='Iteration', row=current_row, col=1)
