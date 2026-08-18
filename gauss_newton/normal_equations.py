@@ -52,6 +52,9 @@ class NormalEquations:
     H, g       : H = J^T J, g = J^T r по измерительным невязкам;
     J_G, R_G   : строки непрерывности шутов (в H не свёрнуты, см. модульный docstring);
     rss        : ||r||^2 по измерениям; n_rows: число измерительных строк.
+
+    Непрерывность здесь — ОГРАНИЧЕНИЕ, а не наблюдение: и шаг (седловая
+    система), и ковариация (ККТ-матрица) держат её отдельным блоком.
     """
     H: object
     g: np.ndarray
@@ -94,24 +97,58 @@ class NormalEquations:
                      / max(self.H.diagonal().sum(), 1e-300))
 
     def covariance_theta(self, n_theta, ridge=1e-8):
-        """Маргинальная ковариация theta прямо из H, без построения J.
+        """Ковариация theta при ТОЧНЫХ ограничениях непрерывности.
 
-        J_full = [J; J_G], J_full^T J_full = H + J_G^T J_G; возвращается
-        theta-блок обратной матрицы (Шур-комплемент по блоку c).
+        Непрерывность — это ограничение (траектория обязана быть непрерывной),
+        а не измерение: ковариация берётся из ККТ-матрицы
+
+            [[H, J_G^T], [J_G, 0]],
+
+        её (1,1)-блок — проекция H^{-1} на касательное подпространство
+        ограничений. Ровно ту же матрицу решает gn_step при mu = 0, поэтому
+        стоимость — один splu плюс n_theta обратных подстановок.
+
+        Прежняя формула (H + J_G^T J_G, то есть строки стыковки как
+        наблюдения с весом 1) НЕВЕРНА и была заменена: она зависит от
+        произвольного масштаба J_G (умножение J_G на 1000 меняло СКО в 2.4
+        раза) и систематически завышала интервалы — тем сильнее, чем больше
+        шутов (N_shoot=5: в 2.4 раза, N_shoot=20: в 6.1 раза). Проверки:
+        pytests/covariance_test.py — совпадение с single shooting (там
+        ограничений нет вовсе) и покрытие 95%-х интервалов по Монте-Карло.
+
+        sigma^2 = ||r||^2 / dof — только измерительная невязка: строки
+        стыковки не наблюдения, в остаточную сумму они не входят. dof
+        не меняется: n_rows + n_cont - n_params = n_rows - n_theta - nx,
+        то есть число измерений минус число СВОБОДНЫХ неизвестных.
         """
-        A = self.H + (self.J_G.T @ self.J_G) if self.R_G.size else self.H
-        n_params = A.shape[0]
-        dof = max(self.n_rows + self.n_cont - n_params, 1)
-        sigma2 = self.cost() / dof
+        n_params = self.H.shape[0]
+        m = self.n_cont
+        dof = max(self.n_rows + m - n_params, 1)
+        sigma2 = self.rss / dof
 
-        rhs = np.zeros((n_params, n_theta))
+        H_reg = self.H + ridge * speye(n_params)
+        if m:
+            K = bmat([[H_reg, self.J_G.T], [self.J_G, None]], format='csc')
+        else:
+            K = H_reg.tocsc()                      # single shooting: обычный МНК
+        rhs = np.zeros((n_params + m, n_theta))
         rhs[:n_theta, :] = np.eye(n_theta)
-        A_reg = (A + ridge * speye(n_params)).tocsc()
         try:
-            X = splu(A_reg).solve(rhs)
+            X = splu(K).solve(rhs)
         except RuntimeError:
-            X = np.linalg.pinv(A_reg.toarray()) @ rhs
+            X = np.linalg.pinv(K.toarray()) @ rhs
         return sigma2 * X[:n_theta, :], sigma2, dof
+
+    def correlation_theta(self, n_theta, ridge=1e-8):
+        """Корреляционная матрица theta и её число обусловленности.
+
+        Диагностика идентифицируемости: |corr| близкое к 1 означает, что
+        параметры различимы только в комбинации («плоская долина» — у
+        Лотки–Вольтерры corr(alpha, beta) = 0.997). Считается из той же
+        ковариации, дополнительных решений системы не требует.
+        """
+        cov, _, _ = self.covariance_theta(n_theta, ridge=ridge)
+        return correlation_matrix(cov)
 
 
 class AccumulateMixin:
@@ -176,6 +213,20 @@ def normal_equations_of(problem, theta_full):
     if hasattr(problem, 'normal_equations'):
         return problem.normal_equations(theta_full)
     return NormalEquations.from_jacobian(*problem.solve(theta_full))
+
+
+def correlation_matrix(cov):
+    """(corr, cond) из ковариационной матрицы — диагностика идентифицируемости.
+
+    cond — число обусловленности корреляционной матрицы: растёт, когда
+    появляются почти вырожденные комбинации параметров.
+    """
+    d = np.sqrt(np.diag(cov))
+    scale = np.where(d > 0, d, 1.0)
+    corr = cov / np.outer(scale, scale)
+    s = np.linalg.svd(corr, compute_uv=False)
+    cond = float(s[0] / s[-1]) if s[-1] > 0 else np.inf
+    return corr, cond
 
 
 def confidence_intervals(theta_opt, cov, dof, alpha=0.05):

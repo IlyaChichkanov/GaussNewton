@@ -5,8 +5,7 @@ import numpy as np
 from commom_utils.ode_system import (CompiledModel, ODESystem,
                                      VariationalIntegrator)
 from commom_utils.sensitivity import SensitivityTrajectory
-from scipy.sparse import (bmat, block_diag, csr_matrix, vstack, hstack,
-                          eye as speye)
+from scipy.sparse import (bmat, block_diag, csr_matrix, diags, vstack, hstack)
 
 
 @dataclass
@@ -123,7 +122,8 @@ class TimeIntervalManager:
 class MultipleShooting:
 
     def __init__(self, system: ODESystem, N_shoot: int, gamma: np.ndarray = None,
-                 c0_cost: float = 1, use_jax: bool = False, verbose: bool = False):
+                 c0_cost: float = 1, use_jax: bool = False, verbose: bool = False,
+                 cont_scale=None):
         # Модель и интегратор разделены: self.system — скомпилированная
         # модель (f, h, якобианы, наблюдения), self.integrator — способ
         # получить чувствительности шута. CollocationShooting подменяет
@@ -135,6 +135,8 @@ class MultipleShooting:
         self.c0_cost = c0_cost
         self.use_jax = use_jax
         self.verbose = verbose
+        self.cont_scale = cont_scale
+        self._cont_w = None            # 1/масштаб по состояниям (кэш)
 
         # Данные батчей и раскладка неизвестных
         self.state_measured_batches = []
@@ -148,6 +150,60 @@ class MultipleShooting:
         self.t_eval_measurements_batches.append(t_eval_measurements)
         self.interval_managers.append(tm)
         self.layout.add_batch(tm.N_shoot)
+        self._cont_w = None            # масштаб считается по всем батчам
+
+    def _cont_weights(self):
+        """Веса строк непрерывности 1/scale по состояниям (считаются один раз).
+
+        Зачем. Блок -mu*I седловой системы одинаково взвешивает невязки
+        стыковки ВСЕХ состояний, поэтому метод не инвариантен к единицам
+        измерения: та же задача с одной координатой в 1000 раз крупнее
+        решается заметно хуже (rel_err 9.5e-3 -> 2.8e-1, стыковка 1e-12 ->
+        1e-5). Деление строк стыковки на масштаб состояния убирает эту
+        зависимость: строки становятся безразмерными, и -mu*I снова
+        одинаково относится ко всем состояниям.
+
+        cont_scale: None — без масштабирования (поведение по умолчанию,
+        числа прежние); массив (nx,) — явные масштабы состояний;
+        'auto' — СКЗ измерений (доступно только при h(x) = x, иначе
+        измерения не дают масштабов состояний напрямую).
+
+        Веса ФИКСИРУЮТСЯ: менять их между итерациями нельзя — тогда
+        менялась бы сама merit-функция и gain ratio сравнивал бы разное.
+        """
+        if self._cont_w is not None:
+            return self._cont_w
+
+        nx = self.system.nx
+        req = self.cont_scale
+        if req is None:
+            scale = np.ones(nx)
+        elif isinstance(req, str):
+            if req != 'auto':
+                raise ValueError(
+                    f"cont_scale: ожидалось None, 'auto' или массив ({nx},), "
+                    f"получено {req!r}")
+            if not self.system.identity_observation:
+                raise ValueError(
+                    "cont_scale='auto' работает только при тождественном "
+                    "наблюдении h(x) = x: иначе измерения не дают масштабов "
+                    "состояний. Передайте массив масштабов явно.")
+            if not self.state_measured_batches:
+                raise ValueError("cont_scale='auto': сначала нужен add_batch")
+            meas = np.vstack([np.asarray(m, float)
+                              for m in self.state_measured_batches])
+            scale = np.sqrt((meas ** 2).mean(axis=0))
+            scale = np.where(scale > 0, scale, 1.0)      # константный нуль -> 1
+        else:
+            scale = np.asarray(req, dtype=float)
+            if scale.shape != (nx,):
+                raise ValueError(
+                    f"cont_scale: ожидался массив ({nx},), получено {scale.shape}")
+            if np.any(scale <= 0):
+                raise ValueError("cont_scale: масштабы должны быть > 0")
+
+        self._cont_w = 1.0 / scale
+        return self._cont_w
 
 
     def make_full_theta(self, theta0, c0_guess=None, c0_init_method='inverse_h',
@@ -308,6 +364,8 @@ class MultipleShooting:
 
         G_j = x_j(t_{j+1}; c_j, θ) − c_{j+1}: θ-часть — S_theta_end шута j,
         c-часть блочно-бидиагональна (S_c_end в колонке шута j, −I в колонке j+1).
+        Строки делятся на масштаб состояния (см. `_cont_weights`); при
+        cont_scale=None веса равны 1 и числа не меняются.
         """
         n_state, n_theta, _ = self.system.dims()
         n_shoot = len(rows)
@@ -315,15 +373,16 @@ class MultipleShooting:
         if n_cont == 0:
             return csr_matrix((0, n_theta + n_shoot * n_state)), np.zeros(0)
 
-        R_G = np.concatenate([-(rows[j].x_end - rows[j + 1].c0)
+        w = self._cont_weights()                   # (n_state,), 1/масштаб
+        R_G = np.concatenate([w * -(rows[j].x_end - rows[j + 1].c0)
                               for j in range(n_shoot - 1)])
         # По блочной строке на стык j|j+1: [S_theta_end_j | ... S_c_end_j, -I ...]
-        eye = speye(n_state)
+        minus_eye = -diags(w)
         blocks = []
         for j in range(n_shoot - 1):
-            row = [csr_matrix(rows[j].S_theta_end)] + [None] * n_shoot
-            row[1 + j] = csr_matrix(rows[j].S_c_end)
-            row[2 + j] = -eye
+            row = [csr_matrix(w[:, None] * rows[j].S_theta_end)] + [None] * n_shoot
+            row[1 + j] = csr_matrix(w[:, None] * rows[j].S_c_end)
+            row[2 + j] = minus_eye
             blocks.append(row)
         return bmat(blocks, format='csr'), R_G
 

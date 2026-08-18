@@ -17,12 +17,12 @@ class CollocationShooting(MultipleShooting):
     def __init__(self, system, N_shoot, gamma=None, c0_cost=1, verbose=False,
                  K=3, n_sub=1, newton_tol=1e-10, newton_maxiter=25,
                  rootfinder_plugin='newton', rootfinder_options=None,
-                 n_threads=None):
+                 n_threads=None, cont_scale=None):
         # use_jax=True направляет shoot_rows в батчевый вход
         # get_jacobian_solution_jax_batch — у коллокационного интегратора он
         # реализован потоковым маршем по шутам (JAX не используется)
         super().__init__(system, N_shoot, gamma=gamma, c0_cost=c0_cost,
-                         use_jax=True, verbose=verbose)
+                         use_jax=True, verbose=verbose, cont_scale=cont_scale)
         # Родитель уже скомпилировал модель (self.system) и создал
         # вариационный интегратор; заменяем только интегратор, модель общая
         self.integrator = CollocationIntegrator(
