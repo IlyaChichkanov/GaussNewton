@@ -14,7 +14,8 @@ from gauss_newton.gauss_newton_math import MultipleShooting
 class CollocationShooting(MultipleShooting):
 
     def __init__(self, system, N_shoot, gamma=None, c0_cost=1, verbose=False,
-                 K=3, n_sub=1, newton_tol=1e-10, newton_maxiter=15,
+                 K=3, n_sub=1, newton_tol=1e-10, newton_maxiter=25,
+                 rootfinder_plugin='newton', rootfinder_options=None,
                  n_threads=None):
         # use_jax=True направляет _solve_batch в батчевый вход
         # get_jacobian_solution_jax_batch — здесь он реализован коллокационным
@@ -26,4 +27,6 @@ class CollocationShooting(MultipleShooting):
         self.system = CollocationSystemJacobian(
             system, K=K, n_sub=n_sub,
             newton_tol=newton_tol, newton_maxiter=newton_maxiter,
+            rootfinder_plugin=rootfinder_plugin,
+            rootfinder_options=rootfinder_options,
             n_threads=n_threads)

@@ -82,7 +82,14 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
     """
     theta_full = theta_full.copy()
     n_theta = problem.system.get_dimentions()[1]
-    ne = normal_equations_of(problem, theta_full)
+    try:
+        ne = normal_equations_of(problem, theta_full)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Интегратор не справился в НАЧАЛЬНОЙ точке theta0 (до первого шага "
+            "ГН). Для коллокаций: увеличьте n_sub (мельче элементы), ослабьте "
+            "newton_tol или поднимите newton_maxiter, либо выберите более "
+            f"правдоподобное theta0. Исходная ошибка: {exc}") from exc
 
     def mu_ratio(ne_):
         return float(np.clip(ne_.cont_sq() / (kappa * max(ne_.rss, 1e-300)),

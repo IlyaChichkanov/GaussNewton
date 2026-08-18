@@ -357,6 +357,15 @@ def compute_delta_gn(J, R, J_G, R_G, mu, lambda_, lambda_reg, theta_full, mu_dec
     return delta_theta, new_mu
 
 def run_optimization(problem, config, theta_full, system, verbose=True):
+    """Старый цикл ГН с ручным расписанием mu (config.mu, config.mu_dec).
+
+    Оставлен как эталон для сравнения (бенч-ячейки, старые ноутбуки) и не
+    развивается. Для новой работы используйте
+    gauss_newton.adaptive.run_optimization_adaptive: mu и lambda подбираются
+    сами, есть автоматическая остановка (этот цикл всегда делает все n_iter
+    итераций). ВНИМАНИЕ: интерфейсы разные — этот возвращает кортеж из шести
+    элементов, адаптивный возвращает (theta_full, hist-словарь).
+    """
     theta_hist = [theta_full[:].copy()]
     r_meas_hist = []
     r_cont_hist = []
@@ -370,7 +379,14 @@ def run_optimization(problem, config, theta_full, system, verbose=True):
     mu_min = getattr(config, 'mu_min', 1e-6)
 
     # Начальные невязки для сравнения
-    J, R, J_G, R_G = problem.solve(theta_full)
+    try:
+        J, R, J_G, R_G = problem.solve(theta_full)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Интегратор не справился в НАЧАЛЬНОЙ точке theta0 (до первого шага "
+            "ГН). Для коллокаций: увеличьте n_sub (мельче элементы), ослабьте "
+            "newton_tol или поднимите newton_maxiter, либо выберите более "
+            f"правдоподобное theta0. Исходная ошибка: {exc}") from exc
     best_cost = np.sum(R**2) + np.sum(R_G**2)  # полная стоимость
     if verbose:
         print(f'  J nnz: {J.nnz}, J_G nnz: {J_G.nnz}')
@@ -404,8 +420,13 @@ def run_optimization(problem, config, theta_full, system, verbose=True):
             break
 
 
-        J_trial, R_trial, J_G_trial, R_G_trial = problem.solve(theta_trial)
-        trial_cost = np.sum(R_trial**2) + np.sum(R_G_trial**2)
+        try:
+            J_trial, R_trial, J_G_trial, R_G_trial = problem.solve(theta_trial)
+            trial_cost = np.sum(R_trial**2) + np.sum(R_G_trial**2)
+        except RuntimeError:
+            # Интегратор не справился в пробной точке (например, Ньютон
+            # коллокаций не сошёлся) — отклонённый шаг, а не фатальная ошибка
+            trial_cost = np.inf
 
         # Принимаем шаг только если стоимость уменьшилась (или не изменилась)
         if not np.isnan(trial_cost) and trial_cost <= best_cost*1.1:
