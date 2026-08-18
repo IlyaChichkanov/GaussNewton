@@ -171,9 +171,9 @@ def plot_solution(
 
     def get_traj(c0, t_eval):
         if problem.use_jax:
-            sol = problem.system.get_solution_jax(c0, theta, t_eval)
+            sol = problem.integrator.get_solution_jax(c0, theta, t_eval)
         else:
-            sol = problem.system.get_solution(c0, theta, t_eval)
+            sol = problem.integrator.get_solution(c0, theta, t_eval)
         return sol.T  # (n_time, n_state)
 
     # ------------------------------------------------------------

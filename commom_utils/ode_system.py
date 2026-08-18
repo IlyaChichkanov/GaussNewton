@@ -46,21 +46,20 @@ class ODESystem:
         return []
 
 
-class SystemJacobian:
-    """
-    Класс для вычисления правых частей, якобианов и интегрирования системы.
-    Поддерживает как обычный режим (NumPy + SciPy), так и JAX-режим (jaxadi.convert).
+class CompiledModel:
+    """Скомпилированная модель: f, h и их якобианы, numpy- и jax-бэкенды.
+
+    ТОЛЬКО модель, без интегрирования: компиляция CasADi/jaxadi, поточечный
+    фасад (f, h, df_dx, ...), батчевые наблюдения и обращение наблюдения.
+    Интегрирование чувствительностей — отдельные классы по композиции:
+    VariationalIntegrator (здесь же) и CollocationIntegrator
+    (commom_utils/collocation.py) — оба держат CompiledModel и делят одну
+    компиляцию.
     """
 
-    def __init__(self, model: ODESystem, method: str = 'RK45'):
-        """
-        model: объект System, предоставляющий символьное описание модели.
-        method: метод интегрирования для solve_ivp (например, 'RK45').
-        """
-        self.ATOL = 1e-5
-        self.RTOL = 1e-5
+    def __init__(self, model: ODESystem):
+        """model: объект ODESystem, предоставляющий символьное описание."""
         self.model = model
-        self.method = method
 
         # Получаем символьные переменные и выражения
         state_var, theta_var, inp_signal_var, f = self.model.get_system()
@@ -289,13 +288,40 @@ class SystemJacobian:
         inp = self._get_inp_signals(t)
         return jnp.array(self._df_dx_jax_ca(*state, *inp, *theta))[0]
 
-    # ----------------------------------------------------------------------
-    # Интегрирование
-    # ----------------------------------------------------------------------
+class VariationalIntegrator:
+    """Интегратор чувствительностей: вариационные уравнения, scipy/jax.
+
+    Модель (CompiledModel) держится по КОМПОЗИЦИИ: она отвечает за f, h и их
+    якобианы, интегратор — за уравнения, сетку и допуски. Тот же контракт
+    выхода реализует CollocationIntegrator (commom_utils/collocation.py) —
+    для жёстких систем; здесь оба бэкенда ЯВНЫЕ (solve_ivp RK45 / jax dopri).
+
+    Вариационные уравнения (theory_gauss_newton.ipynb, раздел 3):
+
+        J_theta' = f_x J_theta + f_theta,   J_theta(t_0) = 0
+        J_c'     = f_x J_c,                 J_c(t_0)     = I
+
+    Правые части записаны ровно ДВАЖДЫ — numpy и jax, — одинаковой схемой:
+    f_x общий множитель обоих уравнений, поэтому считается один раз и
+    применяется к склейке [S_theta | S_c]. Разница только в бэкенде.
+    """
+
+    def __init__(self, model, method: str = 'RK45'):
+        # Удобство ноутбуков и тестов: принимает и сырую ODESystem,
+        # и уже скомпилированную модель (тогда компиляция общая)
+        self.model = (model if isinstance(model, CompiledModel)
+                      else CompiledModel(model))
+        self.method = method
+        self.ATOL = 1e-5
+        self.RTOL = 1e-5
+        self._jax_vmap_full = None   # кэш vmap-обёртки батчевого интегратора
+
     def get_solution(self, c0, theta, t_eval):
         """Интегрирование только состояния (обычный режим)."""
+        m = self.model
+
         def system(t, y):
-            return self.f(y, t, theta[:self.n_theta])
+            return m.f(y, t, theta[:m.n_theta])
 
         sol = solve_ivp(system, (t_eval[0], t_eval[-1]), c0,
                         t_eval=t_eval, method=self.method,
@@ -306,7 +332,7 @@ class SystemJacobian:
 
     def get_jacobian_solution(self, c0, theta, t_eval):
         """Интегрирование расширенной системы (состояние + чувствительности) (обычный режим)."""
-        p = self.n_theta
+        p = self.model.n_theta
         y0 = initial_flat_row(c0, p)
 
         def full_ode(t, y):
@@ -324,10 +350,10 @@ class SystemJacobian:
     # ----------------------------------------------------------------------
     def get_solution_jax(self, c0, theta, t_eval):
         """JAX-интегрирование только состояния."""
-        sol = odeint(self.f_jax,
+        sol = odeint(self.model.f_jax,
                      jnp.array(c0),
                      jnp.array(t_eval),
-                     *theta[:self.n_theta],
+                     *theta[:self.model.n_theta],
                      rtol=self.RTOL, atol=self.ATOL)
         return np.array(sol).T
 
@@ -337,7 +363,7 @@ class SystemJacobian:
         jax.jit сам перекомпилирует при смене формы (число шутов, длина сетки).
         """
         if self._jax_vmap_full is None:
-            n, p = self.nx, self.n_theta
+            n, p = self.model.nx, self.model.n_theta
             # Хвост начальной строки (S_theta = 0, S_c = I) — константа
             sens0 = jnp.array(initial_flat_row(np.zeros(n), p)[n:])
 
@@ -358,9 +384,9 @@ class SystemJacobian:
 
         c0_list: список/массив (S, nx); t_grids: список массивов времени.
         Возвращает список из S матриц (nx + nx·np + nx·nx, L_i) — как
-        get_jacobian_solution_jax для каждого шута.
+        get_jacobian_solution для каждого шута.
         """
-        theta_j = jnp.array(np.asarray(theta[:self.n_theta], dtype=float))
+        theta_j = jnp.array(np.asarray(theta[:self.model.n_theta], dtype=float))
 
         results = [None] * len(t_grids)
         integrate = self._vmapped_full_integrator()
@@ -373,14 +399,7 @@ class SystemJacobian:
         return results
 
     # ----------------------------------------------------------------------
-    # Вариационные уравнения (theory_gauss_newton.ipynb, раздел 3)
-    #
-    #     J_theta' = f_x J_theta + f_theta,   J_theta(t_0) = 0
-    #     J_c'     = f_x J_c,                 J_c(t_0)     = I
-    #
-    # Записаны ровно ДВАЖДЫ — numpy и jax, — одинаковой схемой: f_x общий
-    # множитель обоих уравнений, поэтому считается один раз и применяется к
-    # склейке [S_theta | S_c]. Разница между версиями только в бэкенде.
+    # Вариационные уравнения — правые части
     # ----------------------------------------------------------------------
     def _variational_rhs(self, y, t, theta):
         """Правая часть расширенной системы (numpy).
@@ -389,13 +408,14 @@ class SystemJacobian:
         f/df_dx/df_dtheta, и пользовательская get_input_signals звалась трижды
         на каждый шаг интегратора.
         """
-        n, p = self.nx, self.n_theta
+        m = self.model
+        n, p = m.nx, m.n_theta
         x, S_theta, S_c = split_row(y, n, p)
 
-        args = (*x, *self._get_inp_signals(t), *theta)
-        dx = np.array(self._f_ca(*args)).ravel()
-        f_x = np.array(self._df_dx_ca(*args))
-        f_theta = np.array(self._df_dtheta_ca(*args))
+        args = (*x, *m._get_inp_signals(t), *theta)
+        dx = np.array(m._f_ca(*args)).ravel()
+        f_x = np.array(m._df_dx_ca(*args))
+        f_theta = np.array(m._df_dtheta_ca(*args))
 
         dS = f_x @ np.concatenate([S_theta, S_c], axis=1)
         # layout плоский: сначала весь S_theta, потом весь S_c (C-order каждый),
@@ -411,35 +431,38 @@ class SystemJacobian:
         входные сигналы трижды за вызов (под jit это цена трассировки, но
         пара версий обязана читаться как одно и то же дважды).
         """
-        n, p = self.nx, self.n_theta
+        m = self.model
+        n, p = m.nx, m.n_theta
         x, S_theta, S_c = split_row(y, n, p)
 
-        args = (*x, *self._get_inp_signals(t), *theta)
-        dx = jnp.array(self._f_jax_ca(*args)[0].flatten())
-        f_x = jnp.array(self._df_dx_jax_ca(*args))[0]
-        f_theta = jnp.array(self._df_dtheta_jax_ca(*args))[0]
+        args = (*x, *m._get_inp_signals(t), *theta)
+        dx = jnp.array(m._f_jax_ca(*args)[0].flatten())
+        f_x = jnp.array(m._df_dx_jax_ca(*args))[0]
+        f_theta = jnp.array(m._df_dtheta_jax_ca(*args))[0]
 
         dS = f_x @ jnp.concatenate([S_theta, S_c], axis=1)
         return jnp.concatenate([dx, (dS[:, :p] + f_theta).flatten(),
                                 dS[:, p:].flatten()])
 
 
-class SystemIntegrator(SystemJacobian):
+class SystemIntegrator(CompiledModel):
     """Интегрирование с УДЕРЖИВАЕМЫМ входом u, заданным вызывающей стороной.
 
-    Отличие от SystemJacobian: там входы берутся из модели
+    Отличие от остальной библиотеки: там входы берутся из модели
     (get_input_signals(t)), а здесь u — аргумент и держится постоянным на
     шаге. Именно это нужно симуляции MPC: вход выдаёт регулятор, а не модель.
 
-    Раньше это был отдельный класс, целиком повторявший компиляцию CasADi из
-    SystemJacobian, причём с ДРУГИМ порядком аргументов — Function объявлялся
-    как [state, theta, u], а get_lin_system_dynamics звал его как
+    Раньше это был отдельный класс, целиком повторявший компиляцию CasADi,
+    причём с ДРУГИМ порядком аргументов — Function объявлялся как
+    [state, theta, u], а get_lin_system_dynamics звал его как
     (state, u, theta), то есть подставлял вход в слоты параметров. Теперь
-    функции берутся у родителя, и такой рассинхрон невозможен по построению.
+    функции берутся у CompiledModel, и такой рассинхрон невозможен по
+    построению.
     """
 
     def __init__(self, model: ODESystem, method: str = 'RK45'):
-        super().__init__(model, method=method)
+        super().__init__(model)
+        self.method = method
         # Якобиан по входу — единственное, чего нет у родителя
         state_var, theta_var, inp_var, f = model.get_system()
         self._f_u_ca = Function(
@@ -517,13 +540,12 @@ class SyntheticDataGenerator:
     """
 
     def __init__(self, system_ode: ODESystem, sigma=0.01, perturb_initial=False, perturbation_scale=0.1, use_jax=True):
-        self.system = SystemJacobian(system_ode)
+        self.system = CompiledModel(system_ode)
+        self.integrator = VariationalIntegrator(self.system)
         self.sigma = sigma
         self.perturb_initial = perturb_initial
         self.perturbation_scale = perturbation_scale
         self.use_jax = use_jax
-
-
 
         self.state_len, self.theta_len, self.meas_len = self.system.dims()
 
@@ -567,8 +589,8 @@ class SyntheticDataGenerator:
         t_eval = np.linspace(t_start, t_end, n_measurements)
 
         # Обе версии интегратора возвращают (state_len, n_measurements)
-        integrate = (self.system.get_solution_jax if self.use_jax
-                     else self.system.get_solution)
+        integrate = (self.integrator.get_solution_jax if self.use_jax
+                     else self.integrator.get_solution)
         solution = integrate(c0_true, theta, t_eval)
 
         # Добавляем шум к состояниям
@@ -640,7 +662,8 @@ class MHESyntheticDataGenerator:
     """
 
     def __init__(self, system_ode: ODESystem, sigma=1e-3):
-        self.system = SystemJacobian(system_ode)
+        self.system = CompiledModel(system_ode)
+        self.integrator = VariationalIntegrator(self.system)
         self.sigma = sigma
         self.state_dim, self.param_dim, self.meas_dim = self.system.dims()
         # Determine control dimension (adjust if your system has a different attribute)
@@ -673,7 +696,7 @@ class MHESyntheticDataGenerator:
             u[i] = self.system.model.get_input_signals(ti)
 
         # Integrate system to obtain full states
-        full_states = self.system.get_solution(c0, theta, t).T  # shape (len(t), state_dim)
+        full_states = self.integrator.get_solution(c0, theta, t).T  # shape (len(t), state_dim)
 
         # Compute measured outputs
         measured = np.zeros((len(t), self.meas_dim))
@@ -744,11 +767,11 @@ class MHESyntheticDataGenerator:
 def check_system_ok(system_ode: ODESystem):
     """Дешёвая проверка согласованности модели: компиляция + число входов.
 
-    Сама компиляция SystemJacobian уже валидирует размерности символов;
+    Сама компиляция CompiledModel уже валидирует размерности символов;
     отдельно проверяем только то, что она проверить не может — что
     get_input_signals возвращает ровно nu сигналов.
     """
-    system = SystemJacobian(system_ode)
+    system = CompiledModel(system_ode)
     n_inp = len(system_ode.get_input_signals(0))
     if system.nu != n_inp:
         raise ValueError(

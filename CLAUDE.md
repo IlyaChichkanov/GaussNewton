@@ -13,22 +13,25 @@ multiple shooting. Два интегратора чувствительност�
     `get_input_signals` вызывается ИЗНУТРИ правой части ОДУ — с трассируемым t
     под jax odeint и с массивом t в коллокациях: только `jnp`, без `math.*`
     и питоновских `if t < ...` (нужен `jnp.where`).
-  - `SystemJacobian` — компилирует CasADi-функции f, h и их якобианов; интеграторы
-    расширенной системы (состояние + чувствительности) через scipy `solve_ivp` и
-    jax `odeint`. Значения: `f` (правая часть) и `h` (наблюдение) — имена
-    именно такие, `f_x_theta`/`h_x` удалены как вводящие в заблуждение.
-    Якобианы: `df_dx`, `df_dtheta`, `dh_dx`, `dh_dtheta`. Размерности —
-    `dims()` → `Dims(nx, n_theta, n_obs)` (NamedTuple). Интеграторы:
-    `get_jacobian_solution`, `get_solution`, `get_jacobian_solution_jax_batch`
-    (vmap+jit, группировка шутов по длине сетки), `observation_batch`,
-    `inverse_h`. Вариационные уравнения записаны ровно дважды —
-    `_variational_rhs` и `_variational_rhs_jax`, одинаковой схемой (общий
-    `args`, входные сигналы один раз за вызов, распаковка через
-    `split_row`); одиночный jax-интегратор удалён — есть только батчевый.
-    Приватные CasADi-хендлы названы по публичным обёрткам (`_df_dx_ca` ↔
-    `df_dx`); общий `_inp_on_times(t_flat)` — входы на векторе времени
-    с fallback по точкам (им пользуются и коллокации).
-  - `SystemIntegrator(SystemJacobian)` — интегрирование с УДЕРЖИВАЕМЫМ входом u
+  - `CompiledModel` — ТОЛЬКО модель, без интегрирования: компилирует
+    CasADi/jaxadi-функции f, h и их якобианов. Значения: `f` (правая часть)
+    и `h` (наблюдение) — имена именно такие, `f_x_theta`/`h_x` удалены как
+    вводящие в заблуждение. Якобианы: `df_dx`, `df_dtheta`, `dh_dx`,
+    `dh_dtheta`. Размерности — `dims()` → `Dims(nx, n_theta, n_obs)`
+    (NamedTuple). Плюс `observation_batch`, `inverse_h`,
+    `identity_observation` и общий `_inp_on_times(t_flat)` — входы на
+    векторе времени с fallback по точкам. Приватные CasADi-хендлы названы
+    по публичным обёрткам (`_df_dx_ca` ↔ `df_dx`).
+  - `VariationalIntegrator` — интегратор чувствительностей по КОМПОЗИЦИИ:
+    держит `model` (CompiledModel; конструктор принимает и сырую ODESystem),
+    свои `ATOL`/`RTOL`/`method`. Методы: `get_jacobian_solution`,
+    `get_solution`, `get_solution_jax`, `get_jacobian_solution_jax_batch`
+    (vmap+jit, группировка шутов по длине сетки). Вариационные уравнения
+    записаны ровно дважды — `_variational_rhs` и `_variational_rhs_jax`,
+    одинаковой схемой (общий `args`, входные сигналы один раз за вызов,
+    распаковка через `split_row`); одиночный jax-интегратор удалён — есть
+    только батчевый.
+  - `SystemIntegrator(CompiledModel)` — интегрирование с УДЕРЖИВАЕМЫМ входом u
     от вызывающей стороны (симуляция MPC), а не из модели. `step`, `step_jax`,
     `integrate`, `get_lin_system_dynamics` → (A, B, D).
   - `SyntheticDataGenerator` — генерация тестовых данных.
@@ -46,9 +49,13 @@ multiple shooting. Два интегратора чувствительност�
 - `commom_utils/collocation.py`
   - `RadauTables(K)` — узлы Радо IIA (K=1,2,3), матрица дифференцирования
     D̃=[d0|D1], таблица Бутчера `butcher_a = inv(D1)`.
-  - `CollocationSystemJacobian(SystemJacobian)` — переопределяет ТОЛЬКО
-    интеграторы: компилированный марш CasADi (`ca.rootfinder('newton')` +
-    `mapaccum` + `map('thread')` по шутам). Python-эталон удалён (авг 2026,
+  - `CollocationIntegrator` — drop-in замена VariationalIntegrator для
+    жёстких систем (модель по композиции, тот же контракт выхода):
+    компилированный марш CasADi (`ca.rootfinder('newton')` + `mapaccum` +
+    `map('thread')` по шутам). Построение и кэширование CasADi-функций шага
+    вынесено в `CollocationStepFunctions` (стадийный резидуал, rootfinder,
+    пара step_sens/step_x, mapaccum/map) — интегратор остаётся драйвером
+    марша и политикой проверки сходимости. Python-эталон удалён (авг 2026,
     решение пользователя); внешние арбитры точности — вариационные уравнения
     (`collocation_test.py::test_integrator_matches_reference`) и конечные
     разности (`jacobian_fd_test`). Несходимость Ньютона НЕ бросается из C++
@@ -61,7 +68,9 @@ multiple shooting. Два интегратора чувствительност�
 - `commom_utils/systems.py` — конкретные системы (LotkaVoltera, Attractor, ...).
 - `gauss_newton/problem.py` (бывший `gauss_newton_math.py`) — ТОЛЬКО сборка задачи
   - `MultipleShooting` — `solve(theta_full)` → `(J, R, J_G, R_G)`;
-    `make_full_theta`; ядро `shoot_rows`.
+    `make_full_theta`; ядро `shoot_rows`. Держит РАЗДЕЛЬНО `self.system`
+    (CompiledModel: наблюдения, размерности, inverse_h) и `self.integrator`
+    (чувствительности шутов; VariationalIntegrator по умолчанию).
   - `UnknownsLayout` — раскладка `theta_full = [θ; c_1..c_T]` по батчам и шутам
     (`layout.theta`, `layout.c(batch, shoot)`), строится один раз в `add_batch`.
   - `ShootRows` — блоки одного шута. `J_theta`/`J_c` — строки якобиана НЕВЯЗОК;
@@ -102,9 +111,10 @@ multiple shooting. Два интегратора чувствительност�
   разреженную J, накопительный слой — сразу H и g. `continuity_rows` — строки
   непрерывности.
 - `gauss_newton/collocation_shooting.py` — `CollocationShooting(MultipleShooting)`:
-  подменяет `self.system` на `CollocationSystemJacobian`; передаёт `use_jax=True`,
-  чтобы `_solve_batch` шёл через батчевый вход `get_jacobian_solution_jax_batch`
-  (в коллокационном классе он реализован потоками, JAX не используется).
+  подменяет ТОЛЬКО `self.integrator` на `CollocationIntegrator` (модель
+  `self.system` остаётся общей); передаёт `use_jax=True`, чтобы `shoot_rows`
+  шёл через батчевый вход `get_jacobian_solution_jax_batch` (у коллокационного
+  интегратора он реализован потоками, JAX не используется).
 - `gauss_newton/utils.py` — `plot_solution`.
 - Теория (ноутбуки — пользователь читает формулы ТОЛЬКО в ноутбуках, не в чате):
   `theory_gauss_newton.ipynb` (ГН + MS + ковариация),
@@ -175,9 +185,11 @@ multiple shooting. Два интегратора чувствительност�
 
 ## Контракты (не ломать)
 
-- `get_jacobian_solution(c0, θ, t_eval)` → матрица, строки
+- `get_jacobian_solution(c0, θ, t_eval)` (оба интегратора) → матрица, строки
   `[x; S_θ.flatten(); S_c.flatten()]` (C-order), столбцы = точки t_eval.
   Разбирать её руками не надо: `SensitivityTrajectory.unpack(flat, nx, n_theta)`.
+- Слой задачи зовёт интегратор ТОЛЬКО через `self.integrator` (протокол
+  VariationalIntegrator/CollocationIntegrator), модель — через `self.system`.
 - `solve(theta_full)` → `(J, R, J_G, R_G)`; `normal_equations(theta_full)` →
   `NormalEquations`. Слой оптимизации знает только их, интегратор ему безразличен.
 - Имена — по `NOTATION.md`. Одна величина = одно имя; если для величины
