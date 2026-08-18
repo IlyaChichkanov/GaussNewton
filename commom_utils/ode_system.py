@@ -76,43 +76,47 @@ class SystemJacobian:
         self.n_theta = len(theta_list)
         self.n_obs = len(h_observ.elements())
 
-        # --- Создание CasADi функций ---
-        self._f_ca = Function('func', [*state_list, *inp_list, *theta_list], [f])
+        # --- Компиляция CasADi-функций (у всех один список аргументов) ---
+        args = [*state_list, *inp_list, *theta_list]
+        state_vec, theta_vec = vertcat(*state_list), vertcat(*theta_list)
+
+        def _fn(name, expr):
+            return Function(name, args, [expr])
+
+        # Имена приватных хендлов повторяют публичные методы-обёртки:
+        # _f_ca <-> f, _dh_dx_ca <-> dh_dx и т.д. (одна величина = одно имя)
+        self._f_ca = _fn('f', f)
         self._f_jax_ca = convert(self._f_ca, compile=True)
+        self._h_ca = _fn('h', h_observ)
+        self._dh_dx_ca = _fn('dh_dx', jacobian(h_observ, state_vec))
+        self._dh_dtheta_ca = _fn('dh_dtheta', jacobian(h_observ, theta_vec))
+        self._df_dtheta_ca = _fn('df_dtheta', jacobian(f, theta_vec))
+        self._df_dtheta_jax_ca = convert(self._df_dtheta_ca, compile=True)
+        self._df_dx_ca = _fn('df_dx', jacobian(f, state_vec))
+        self._df_dx_jax_ca = convert(self._df_dx_ca, compile=True)
 
-        self._h_ca = Function('h', [*state_list, *inp_list, *theta_list], [h_observ])
-
-        # Якобианы
-        J_h_x = jacobian(h_observ, vertcat(*state_list))
-        self._h_x_ca = Function('J_h_x', [*state_list, *inp_list, *theta_list], [J_h_x])
-
-        J_h_theta = jacobian(h_observ, vertcat(*theta_list))
-        self._h_theta_ca = Function('J_h_theta', [*state_list, *inp_list, *theta_list], [J_h_theta])
-
-        J_p = jacobian(f, vertcat(*theta_list))
-        self._f_theta_ca = Function('J_p', [*state_list, *inp_list, *theta_list], [J_p])
-        self._f_theta_jax_ca = convert(self._f_theta_ca, compile=True)
-
-        J_x = jacobian(f, vertcat(*state_list))
-        self._f_x_ca = Function('J_x', [*state_list, *inp_list, *theta_list], [J_x])
-        self._f_x_jax_ca = convert(self._f_x_ca, compile=True)
-
-        # Тождественное наблюдение h(x) = x: dh/dx = I, dh/dθ = 0 —
-        # позволяет полностью пропустить вычисление якобианов наблюдения.
-        # 20 — глубина структурного сравнения выражений в ca.is_equal
-        # (не допуск!); is_equal может бросить на несравнимых формах —
-        # тогда считаем наблюдение нетождественным.
-        state_vec = vertcat(*state_list)
-        try:
-            self.identity_observation = (h_observ.shape == state_vec.shape
-                                         and bool(ca.is_equal(h_observ, state_vec, 20)))
-        except Exception:
-            self.identity_observation = False
+        self.identity_observation = self._is_identity_observation(h_observ,
+                                                                  state_vec)
 
         # Кэши: map-версии функций наблюдения (ключ: (имя, N точек))
         # и vmap-обёртка интегратора расширенной системы
         self._obs_map_cache = {}
         self._jax_vmap_full = None
+
+    @staticmethod
+    def _is_identity_observation(h_observ, state_vec):
+        """h(x) = x? Тогда dh/dx = I, dh/dtheta = 0, и якобианы наблюдения
+        можно не вычислять вовсе.
+
+        20 — глубина структурного сравнения выражений в ca.is_equal
+        (не допуск!); is_equal может бросить на несравнимых формах —
+        тогда считаем наблюдение нетождественным.
+        """
+        try:
+            return (h_observ.shape == state_vec.shape
+                    and bool(ca.is_equal(h_observ, state_vec, 20)))
+        except Exception:
+            return False
 
     # ----------------------------------------------------------------------
     # Вспомогательные методы
@@ -207,22 +211,22 @@ class SystemJacobian:
     def dh_dx(self, state, t, theta):
         """Якобиан выхода по состоянию."""
         inp = self._get_inp_signals(t)
-        return np.array(self._h_x_ca(*state, *inp, *theta))
+        return np.array(self._dh_dx_ca(*state, *inp, *theta))
 
     def dh_dtheta(self, state, t, theta):
         """Якобиан выхода по параметрам."""
         inp = self._get_inp_signals(t)
-        return np.array(self._h_theta_ca(*state, *inp, *theta)).squeeze()
+        return np.array(self._dh_dtheta_ca(*state, *inp, *theta)).squeeze()
 
     def df_dtheta(self, state, t, theta):
         """Якобиан правой части по параметрам."""
         inp = self._get_inp_signals(t)
-        return np.array(self._f_theta_ca(*state, *inp, *theta))
+        return np.array(self._df_dtheta_ca(*state, *inp, *theta))
 
     def df_dx(self, state, t, theta):
         """Якобиан правой части по состоянию."""
         inp = self._get_inp_signals(t)
-        return np.array(self._f_x_ca(*state, *inp, *theta))
+        return np.array(self._df_dx_ca(*state, *inp, *theta))
 
     # ----------------------------------------------------------------------
     # Батчевые вычисления наблюдений (CasADi Function.map)
@@ -232,8 +236,8 @@ class SystemJacobian:
         key = (name, n_points)
         if key not in self._obs_map_cache:
             base = {'h': self._h_ca,
-                    'dh_dx': self._h_x_ca,
-                    'dh_dtheta': self._h_theta_ca}[name]
+                    'dh_dx': self._dh_dx_ca,
+                    'dh_dtheta': self._dh_dtheta_ca}[name]
             self._obs_map_cache[key] = base.map(n_points)
         return self._obs_map_cache[key]
 
@@ -251,12 +255,16 @@ class SystemJacobian:
         args += [inp[:, j].reshape(1, n_points) for j in range(self.nu)]
         args += [float(theta[k]) for k in range(self.n_theta)]
 
+        def unstack(mat, width):
+            # map стыкует матричные выходы по столбцам:
+            # (n_obs, width*N) -> (N, n_obs, width)
+            return np.array(mat).reshape(self.n_obs, n_points,
+                                         width).transpose(1, 0, 2)
+
         h = np.array(self._obs_mapped('h', n_points)(*args))  # (n_obs, N)
-        # map конкатенирует выходы по столбцам: (n_obs, nx*N) -> (N, n_obs, nx)
-        dh_dx = np.array(self._obs_mapped('dh_dx', n_points)(*args))
-        dh_dx = dh_dx.reshape(self.n_obs, n_points, self.nx).transpose(1, 0, 2)
-        dh_dtheta = np.array(self._obs_mapped('dh_dtheta', n_points)(*args))
-        dh_dtheta = dh_dtheta.reshape(self.n_obs, n_points, self.n_theta).transpose(1, 0, 2)
+        dh_dx = unstack(self._obs_mapped('dh_dx', n_points)(*args), self.nx)
+        dh_dtheta = unstack(self._obs_mapped('dh_dtheta', n_points)(*args),
+                            self.n_theta)
         return h.T, dh_dx, dh_dtheta
 
     # ----------------------------------------------------------------------
@@ -270,7 +278,7 @@ class SystemJacobian:
     def df_dtheta_jax(self, state, t, theta):
         """JAX-совместимый якобиан по параметрам, (nx, n_theta)."""
         inp = self._get_inp_signals(t)
-        return jnp.array(self._f_theta_jax_ca(*state, *inp, *theta))[0]
+        return jnp.array(self._df_dtheta_jax_ca(*state, *inp, *theta))[0]
 
     def df_dx_jax(self, state, t, theta):
         """JAX-совместимый якобиан по состоянию, (nx, nx).
@@ -279,7 +287,7 @@ class SystemJacobian:
         (1, nx, nx), и матумножение на неё молча давало лишнюю ось.
         """
         inp = self._get_inp_signals(t)
-        return jnp.array(self._f_x_jax_ca(*state, *inp, *theta))[0]
+        return jnp.array(self._df_dx_jax_ca(*state, *inp, *theta))[0]
 
     # ----------------------------------------------------------------------
     # Интегрирование
@@ -386,8 +394,8 @@ class SystemJacobian:
 
         args = (*x, *self._get_inp_signals(t), *theta)
         dx = np.array(self._f_ca(*args)).ravel()
-        f_x = np.array(self._f_x_ca(*args))
-        f_theta = np.array(self._f_theta_ca(*args))
+        f_x = np.array(self._df_dx_ca(*args))
+        f_theta = np.array(self._df_dtheta_ca(*args))
 
         dS = f_x @ np.concatenate([S_theta, S_c], axis=1)
         # layout плоский: сначала весь S_theta, потом весь S_c (C-order каждый),
@@ -408,8 +416,8 @@ class SystemJacobian:
 
         args = (*x, *self._get_inp_signals(t), *theta)
         dx = jnp.array(self._f_jax_ca(*args)[0].flatten())
-        f_x = jnp.array(self._f_x_jax_ca(*args))[0]
-        f_theta = jnp.array(self._f_theta_jax_ca(*args))[0]
+        f_x = jnp.array(self._df_dx_jax_ca(*args))[0]
+        f_theta = jnp.array(self._df_dtheta_jax_ca(*args))[0]
 
         dS = f_x @ jnp.concatenate([S_theta, S_c], axis=1)
         return jnp.concatenate([dx, (dS[:, :p] + f_theta).flatten(),
@@ -481,9 +489,9 @@ class SystemIntegrator(SystemJacobian):
         """Линеаризация (A, B, D) = (df/dx, df/du, df/dtheta) в точке."""
         self._check(state, u, theta)
         args = (*state, *u, *theta)
-        return (np.array(self._f_x_ca(*args)),
+        return (np.array(self._df_dx_ca(*args)),
                 np.array(self._f_u_ca(*args)),
-                np.array(self._f_theta_ca(*args)))
+                np.array(self._df_dtheta_ca(*args)))
 
 
 class SyntheticDataGenerator:

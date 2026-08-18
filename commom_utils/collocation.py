@@ -187,10 +187,13 @@ class CollocationSystemJacobian(SystemJacobian):
     # Шаг элемента: rootfinder по стадиям + Psi/Gamma через теорему
     # о неявной функции (ca.jacobian дифференцирует сквозь rootfinder)
     # ------------------------------------------------------------------
-    def _build_step_functions(self):
-        if self._step_fns is not None:
-            return self._step_fns
+    def _stage_residual_fn(self):
+        """Символы шага и резидуал стадийных уравнений.
 
+        Phi(z; x_prev, theta, u, h) = z - A x_prev - h (B (x) I) F(z),
+        A = 1_K (x) I. Возвращает (syms, phi_fn), где syms — кортеж
+        (z, x_prev, theta, u_flat, h, step_param).
+        """
         K, nx, n_theta, nu = self.colloc.K, self.nx, self.n_theta, self.nu
 
         z = ca.MX.sym('z', K * nx)
@@ -199,21 +202,25 @@ class CollocationSystemJacobian(SystemJacobian):
         u_flat = ca.MX.sym('u_flat', K * nu)
         h = ca.MX.sym('h')
 
-        # F(z): правая часть во всех стадиях (SX-функция _f_ca на MX-аргументах)
-        F_stages = []
-        for k in range(K):
-            xk = [z[k * nx + i] for i in range(nx)]
-            uk = [u_flat[k * nu + j] for j in range(nu)]
-            th = [theta[i] for i in range(n_theta)]
-            F_stages.append(self._f_ca(*xk, *uk, *th))
-        F = ca.vcat(F_stages)
+        # F(z): правая часть во всех стадиях (SX-функция _f_ca на MX-аргументах);
+        # vertsplit режет стековые векторы на K блоков стадий, дальше блок
+        # индексируется по своим осям — без сквозной арифметики k*nx + i;
+        # theta одна на все стадии и раскладывается один раз
+        z_stages = ca.vertsplit(z, nx)
+        u_stages = ca.vertsplit(u_flat, nu) if nu else [u_flat] * K
+        th = [theta[i] for i in range(n_theta)]
+        F = ca.vcat([self._f_ca(*(zk[i] for i in range(nx)),
+                                *(uk[j] for j in range(nu)), *th)
+                     for zk, uk in zip(z_stages, u_stages)])
 
-        # Резидуал стадийных уравнений: Phi = z - A x_prev - h (B (x) I) F(z)
         B_kron = ca.DM(self._B_kron)
         step_param = ca.vertcat(x_prev, theta, u_flat, h)
         Phi = z - ca.repmat(x_prev, K, 1) - h * ca.mtimes(B_kron, F)
         phi_fn = ca.Function('colloc_res', [z, step_param], [Phi])
+        return (z, x_prev, theta, u_flat, h, step_param), phi_fn
 
+    def _make_rootfinder(self, phi_fn):
+        """Ньютон по стадиям: опции сходимости и построение rootfinder."""
         rf_opts = {
             'abstol': self.newton_tol,       # невязка: max|Phi| < tol
             'abstolStep': self.newton_tol,   # шаг: max|dz| < tol (критерии - ИЛИ);
@@ -225,9 +232,24 @@ class CollocationSystemJacobian(SystemJacobian):
                                              # по stage_res, без C++ дампов
         }
         rf_opts.update(self.rootfinder_options)
-        stage_solver = ca.rootfinder('colloc_rf', self.rootfinder_plugin,
-                                     phi_fn, rf_opts)
+        return ca.rootfinder('colloc_rf', self.rootfinder_plugin,
+                             phi_fn, rf_opts)
 
+    def _build_step_functions(self):
+        """Шаг элемента как пара CasADi-функций (лениво, с кэшем).
+
+        step_sens: (x_prev, theta, u, h) -> (x_next, Psi, Gamma, stage_res);
+        step_x — то же без чувствительностей. Psi и Gamma — производные
+        выхода rootfinder по теореме о неявной функции (IND).
+        """
+        if self._step_fns is not None:
+            return self._step_fns
+
+        (_, x_prev, theta, u_flat, h, step_param), phi_fn = \
+            self._stage_residual_fn()
+        stage_solver = self._make_rootfinder(phi_fn)
+
+        K, nx = self.colloc.K, self.nx
         z0 = ca.repmat(x_prev, K, 1)          # производная решения по z0 нулевая
         z_sol = stage_solver(z0, step_param)
         # Радо IIA stiffly accurate (tau_K = 1): последний узел совпадает
