@@ -8,7 +8,7 @@ repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root))
 
 from commom_utils.systems import LotkaVoltera, Attractor
-from commom_utils.ode_system import SyntheticDataGenerator, SystemJacobian
+from commom_utils.ode_system import SyntheticDataGenerator
 from gauss_newton.problem import MultipleShooting
 from gauss_newton.adaptive import run_optimization_adaptive
 from gauss_newton.utils import plot_solution

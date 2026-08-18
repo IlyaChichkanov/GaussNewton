@@ -38,7 +38,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy import stats
-from scipy.sparse import bmat, csr_matrix, vstack, eye as speye
+from scipy.sparse import bmat, csr_matrix, eye as speye
 from scipy.sparse.linalg import splu
 
 from gauss_newton.problem import MultipleShooting

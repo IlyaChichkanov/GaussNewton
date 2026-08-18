@@ -3,9 +3,9 @@ import jax
 from jax.experimental.ode import odeint
 from jax import numpy as jnp
 from scipy.integrate import solve_ivp
-from casadi import SX, vertcat, Function, jacobian, vertcat
+from casadi import SX, vertcat, Function, jacobian
 import casadi as ca
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import NamedTuple
 from jaxadi import convert
 
@@ -620,7 +620,6 @@ class SyntheticDataGenerator:
             raise ValueError("Длина seeds должна совпадать с количеством интервалов")
 
         t_batches = []
-        input_signal = []
         measured_batches = []
         state_batches = []
         inp_signals = []

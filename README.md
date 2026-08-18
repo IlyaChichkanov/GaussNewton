@@ -63,7 +63,7 @@ problem.add_batch(meas_batches[0], t_batches[0])
 theta_full = problem.make_full_theta(np.array([1.0, 0.5, 0.2, 0.05]))
 theta_opt, hist = run_optimization_adaptive(problem, theta_full, verbose=True)
 
-print("θ:", theta_opt[:system.np])
+print("θ:", theta_opt[:system.n_theta])
 print("95% CI:", hist["ci_low"][-1], hist["ci_high"][-1])
 ```
 
@@ -83,7 +83,7 @@ problem = CollocationShootingAccum(system, N_shoot=5, gamma=np.ones(system.n_obs
 ```python
 class MyModel(ODESystem):
     def __init__(self):
-        super().__init__(nx=2, np=3, nu=1)      # порядок: nx, np, nu
+        super().__init__(nx=2, n_theta=3, nu=1)   # порядок: nx, n_theta, nu
 
     def get_derivative(self, state, theta, u):
         return ca.vertcat(...)                   # CasADi-выражение
@@ -101,22 +101,27 @@ class MyModel(ODESystem):
 `jnp.where`) и `math.*`. Разрывные по времени входы дают неконтролируемую
 ошибку у адаптивного явного интегратора — см. «Известные ограничения».
 
-## Два цикла оптимизации
+## Цикл оптимизации
 
-| | `run_optimization` (`gauss_newton_math.py`) | `run_optimization_adaptive` (`adaptive.py`) |
-|---|---|---|
-| λ | фиксированное из config | gain ratio (Нильсен) |
-| μ | ручное расписание `mu_dec` | старт по кривизне, Пауэлл |
-| принятие шага | `cost ≤ best·1.1` | ρ > 0 по Φ_μ, для которого шаг посчитан |
-| остановка | `n_iter` / 3 отказа | автоматическая (отказы / стагнация / pred≈0) |
+Цикл один — `run_optimization_adaptive` (`gauss_newton/adaptive.py`), и ручной
+подбор μ₀, `mu_dec` и λ для него не нужен:
 
-Для новых задач берите `run_optimization_adaptive`: ручной подбор μ₀ и `mu_dec`
-не нужен. `run_optimization` оставлен для совместимости со старыми ноутбуками.
+| | как подбирается |
+|---|---|
+| λ (демпфер Марквардта) | по gain ratio, схема Нильсена |
+| μ (вес невязок стыковки) | старт по кривизне ‖J_G‖²_F/tr(H), ужесточение по Пауэллу — только когда ‖R_G‖² не падает сама |
+| принятие шага | ρ > 0 по Φ_μ = ‖R‖² + (1/μ)‖R_G‖², то есть по той функции, для которой шаг и посчитан |
+| остановка | автоматическая: серия отказов, стагнация или pred ≈ 0 |
+
+Прежний цикл с ручным расписанием μ (`run_optimization` + `compute_delta_gn`)
+удалён: он был второй копией той же математики и успел разойтись с первой в
+регуляризации диагонали. Схема воспроизведена локально в
+`adaptive_regularization.ipynb` — там она предмет сравнения, а не рабочий код.
 
 ## Тесты
 
 ```bash
-uv run pytest pytests/ -v         # весь набор
+uv run pytest pytests/ -v         # весь набор (68 passed, 2 skipped)
 uv run pytest pytests/jacobian_fd_test.py -v   # якобиан против конечных разностей
 GN_TEST_PLOT=1 uv run pytest pytests/collocation_accum_test.py   # с графиками
 ```
@@ -125,8 +130,15 @@ GN_TEST_PLOT=1 uv run pytest pytests/collocation_accum_test.py   # с графи
 установлен acados.
 
 Состав: сверка накопительного пути с плотным, коллокаций с `solve_ivp`,
-таблиц Радо с аналитическими значениями, adaptive с базовым шагом и —
-единственная сверка с внешним эталоном — якобиана с конечными разностями.
+таблиц Радо с аналитическими значениями, шага ГН с плотным
+`numpy.linalg.solve` той же седловой системы и — сверка с внешним эталоном —
+якобиана с конечными разностями.
+
+Отдельно `pytests/regression_test.py` держит замороженные матрицы шага
+(`J`, `R`, `J_G`, `R_G`, `H`, `g`, `delta`) для четырёх задач: он ловит
+изменения ЧИСЕЛ, которые не приводят к падению — перестановку осей, другой
+порядок вычислений. Эталон пересоздаётся `GN_REGEN_REFERENCE=1`, и делать это
+стоит только когда изменение осознанное.
 
 ## MHE и MPC
 
@@ -144,16 +156,26 @@ export ACADOS_SOURCE_DIR=<acados>
 ## Структура
 
 ```
-commom_utils/     ODESystem, SystemJacobian, коллокации Радо IIA, конфигурации систем
-gauss_newton/     сборка задачи (J/R/J_G/R_G), нормальные уравнения, адаптивный цикл, графики
+commom_utils/
+  ode_system.py      ODESystem, SystemJacobian, SystemIntegrator, генераторы данных
+  sensitivity.py     SensitivityTrajectory (x, S_theta, S_c), группировка шутов
+  collocation.py     таблицы Радо IIA и коллокационный интегратор
+  systems.py         конкретные модели; system_config.py — их конфигурации
+gauss_newton/
+  problem.py         сборка задачи: ShootRows, UnknownsLayout, MultipleShooting
+  normal_equations.py  NormalEquations (H, g), накопление, ковариация, CI
+  adaptive.py        gn_step и run_optimization_adaptive
+  collocation_shooting.py, utils.py
 mhe/ mpc/         MHE и MPC на acados
 experiments/      ноутбуки на реальных данных (сырые CSV в .gitignore)
 pytests/          тесты
 tools/            nbstrip.py (git-фильтр), setup_repo.sh
-*.ipynb           теория: theory_gauss_newton, collocation, theory_mhe
+*.ipynb           теория: theory_gauss_newton, collocation,
+                  adaptive_regularization, theory_mhe
 ```
 
-Подробная карта модулей и математика — в `CLAUDE.md`.
+**`NOTATION.md` — таблица «теория ↔ код»**: как формула из ноутбука называется
+в коде. Подробная карта модулей и математика — в `CLAUDE.md`.
 
 ## Известные ограничения
 
