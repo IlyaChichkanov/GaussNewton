@@ -63,8 +63,12 @@ class SensitivityTrajectory:
         )
 
     def pack(self):
-        """Обратно в плоский контракт SystemJacobian."""
-        m, nx = self.x.shape
+        """Обратно в плоский контракт SystemJacobian — обратная к unpack.
+
+        Круговой обход проверяется в pytests/sensitivity_test.py: именно он
+        фиксирует, что порядок осей в unpack прочитан верно.
+        """
+        m = self.x.shape[0]
         return np.concatenate([
             self.x.T,
             self.S_theta.transpose(1, 2, 0).reshape(-1, m),
@@ -75,9 +79,6 @@ class SensitivityTrajectory:
         """Первые m точек — измерения интервала без стыковочной точки."""
         return SensitivityTrajectory(self.x[:m], self.S_theta[:m], self.S_c[:m])
 
-    def at(self, i):
-        """Тройка (x, S_theta, S_c) в i-й точке сетки."""
-        return self.x[i], self.S_theta[i], self.S_c[i]
 
 
 def group_by_grid_length(t_grids):

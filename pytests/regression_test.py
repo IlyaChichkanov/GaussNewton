@@ -44,10 +44,23 @@ from gauss_newton.adaptive import gn_step
 REFERENCE = Path(__file__).parent / "data" / "reference.npz"
 REGEN = os.environ.get("GN_REGEN_REFERENCE", "0") not in ("0", "", "false", "False")
 
-# Допуск сверки. Не побитовое равенство: перегруппировка арифметики
-# (например, один вызов f_x вместо двух) законно меняет последние биты.
-# 1e-10 на порядки строже любой содержательной ошибки в якобиане.
-RTOL, ATOL = 1e-10, 1e-12
+# Допуск сверки — свой на каждый интегратор, и вот почему.
+#
+# Коллокации идут по ФИКСИРОВАННОЙ сетке элементов: последовательность
+# операций одна и та же везде, расхождение — только последние биты.
+#
+# solve_ivp и jax odeint выбирают шаг АДАПТИВНО, а решение о размере шага
+# принимается по сравнению оценки ошибки с допуском. Чуть другая арифметика
+# (другой CPU, другая сборка BLAS) — и последовательность шагов расходится,
+# а с ней и результат. Замерено: на раннере GitHub Actions случай
+# integrator_obs разошёлся с локальным эталоном на 1.0e-8 при допуске 1e-10.
+# Это НЕ ошибка якобиана: 1e-8 — точность самого интегратора, а не схемы.
+#
+# 1e-6 всё ещё на порядки строже того, что должен ловить этот тест:
+# перепутанная ось или неверный индекс einsum меняют элементы на O(1),
+# а не в восьмом знаке.
+TOL_EXACT = dict(rtol=1e-10, atol=1e-12)     # фиксированный шаг
+TOL_ADAPTIVE = dict(rtol=1e-6, atol=1e-10)   # адаптивный шаг
 
 # Фиксированная точка линеаризации для шага ГН
 MU, LAM = 1e-3, 1e-3
@@ -112,11 +125,12 @@ def _case_integrator_obs():
                                             c0_init_method='zeros')
 
 
+# case -> (построитель, допуск)
 CASES = {
-    "lv_scipy": _case_lv_scipy,
-    "lv_jax": _case_lv_jax,
-    "lv_colloc": _case_lv_colloc,
-    "integrator_obs": _case_integrator_obs,
+    "lv_scipy": (_case_lv_scipy, TOL_ADAPTIVE),
+    "lv_jax": (_case_lv_jax, TOL_ADAPTIVE),
+    "lv_colloc": (_case_lv_colloc, TOL_EXACT),
+    "integrator_obs": (_case_integrator_obs, TOL_ADAPTIVE),
 }
 
 
@@ -143,7 +157,7 @@ def _snapshot(build):
 
 def _regenerate():
     out = {}
-    for case, build in CASES.items():
+    for case, (build, _) in CASES.items():
         for key, value in _snapshot(build).items():
             out[f"{case}__{key}"] = value
     REFERENCE.parent.mkdir(parents=True, exist_ok=True)
@@ -163,12 +177,13 @@ def test_matches_reference(case, reference):
     if REGEN:
         pytest.skip("эталон только что перегенерирован — сверять не с чем")
 
-    got = _snapshot(CASES[case])
+    build, tol = CASES[case]
+    got = _snapshot(build)
     for key, value in got.items():
         expected = reference[f"{case}__{key}"]
         assert value.shape == expected.shape, \
             f"{case}.{key}: форма {value.shape}, эталон {expected.shape}"
         np.testing.assert_allclose(
-            value, expected, rtol=RTOL, atol=ATOL,
+            value, expected, **tol,
             err_msg=f"{case}.{key} разошёлся с эталоном — поведение изменилось, "
                     f"а не только имена")
