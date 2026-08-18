@@ -164,6 +164,8 @@ class CollocationSystemJacobian(SystemJacobian):
 
     def _node_inputs(self, t_eval):
         """Входы u в узлах всех под-элементов сетки: (N-1, n_sub, K, nu)."""
+        # Массив нехешируем, поэтому ключ — его байты; безопасно, т.к. сюда
+        # t_eval всегда приходит уже нормализованным (asarray(..., float))
         key = (t_eval.tobytes(), self.n_sub)
         cached = self._node_inp_cache.get(key)
         if cached is not None:
@@ -178,6 +180,8 @@ class CollocationSystemJacobian(SystemJacobian):
         flat_t = t_nodes.ravel()
 
         if nu == 0:
+            # Автономная система: пустой массив с правильной формой, чтобы
+            # дальнейшие reshape по осям (n_int, n_sub, K, nu) не ветвились
             inp = np.zeros((n_int, self.n_sub, K, 0))
         else:
             try:
@@ -315,19 +319,16 @@ class CollocationSystemJacobian(SystemJacobian):
         # nan -> inf, чтобы и расходимость, и NaN попали в ветку отказа
         clean = np.nan_to_num(stage_res, nan=np.inf)
         worst = float(np.max(clean))
-        if worst > self.RES_SAFETY * self.newton_tol:
-            n_bad = int(np.sum(clean > self.RES_SAFETY * self.newton_tol))
-            raise self._newton_fail(worst, n_bad, stage_res.size)
-
-    def _newton_fail(self, worst, n_bad, n_total):
-        return RuntimeError(
-            f"Коллокации: Ньютон по стадиям не сошёлся в {n_bad} из {n_total} "
-            f"элементов (max масштабированной невязки {worst:.2e} > "
-            f"{self.RES_SAFETY * self.newton_tol:.1e}; "
-            f"max_iter={self.newton_maxiter}). Увеличьте n_sub (шаг элемента "
-            f"h = dt/n_sub станет меньше), ослабьте newton_tol или поднимите "
-            f"newton_maxiter. В пробной точке оптимизации это штатный отказ "
-            f"шага — цикл его откатит.")
+        limit = self.RES_SAFETY * self.newton_tol
+        if worst > limit:
+            n_bad = int(np.sum(clean > limit))
+            raise RuntimeError(
+                f"Коллокации: Ньютон по стадиям не сошёлся в {n_bad} из "
+                f"{stage_res.size} элементов (max масштабированной невязки "
+                f"{worst:.2e} > {limit:.1e}; max_iter={self.newton_maxiter}). "
+                f"Увеличьте n_sub (шаг элемента h = dt/n_sub станет меньше), "
+                f"ослабьте newton_tol или поднимите newton_maxiter. В пробной "
+                f"точке оптимизации это штатный отказ шага — цикл его откатит.")
 
     # ------------------------------------------------------------------
     # Марш по сетке: один шут и батч шутов
@@ -339,21 +340,22 @@ class CollocationSystemJacobian(SystemJacobian):
         theta_cols, u_cols, h_cols = self._march_inputs(theta, t_eval)
 
         march = self._get_mapaccum(n_elems, with_sens)
-        raw = march(c0, theta_cols, u_cols, h_cols)
 
         if not with_sens:
-            x_all = np.asarray(raw[0])                         # (nx, n_elems)
-            self._check_converged(raw[1])
+            x_stack, stage_res = march(c0, theta_cols, u_cols, h_cols)
+            self._check_converged(stage_res)
             out = np.empty((nx, n_pts))
             out[:, 0] = c0
             # mapaccum отдаёт состояние после КАЖДОГО элемента; точки t_eval —
             # концы каждого n_sub-го
-            out[:, 1:] = x_all[:, self.n_sub - 1::self.n_sub]
+            out[:, 1:] = np.asarray(x_stack)[:, self.n_sub - 1::self.n_sub]
             return out
 
-        self._check_converged(raw[3])
-        x_all, Psi_all, Gamma_all = self._unstack_mapaccum(raw[0], raw[1],
-                                                           raw[2], n_elems)
+        x_stack, Psi_stack, Gamma_stack, stage_res = march(
+            c0, theta_cols, u_cols, h_cols)
+        self._check_converged(stage_res)
+        x_all, Psi_all, Gamma_all = self._unstack_mapaccum(
+            x_stack, Psi_stack, Gamma_stack, n_elems)
         return self._accumulate_sens(c0, x_all, Psi_all, Gamma_all, n_pts)
 
     def _march_batch_compiled(self, c0_list, theta, t_grids):
@@ -376,15 +378,16 @@ class CollocationSystemJacobian(SystemJacobian):
                 *(self._march_inputs(theta, np.asarray(t_grids[i], float))
                   for i in idxs))
             marchmap = self._get_mapmarch(n_elems, len(idxs))
-            raw = marchmap(x0_mat, np.hstack(theta_cols), np.hstack(u_cols),
-                           np.hstack(h_cols))
-            self._check_converged(raw[3])
+            x_stack, Psi_stack, Gamma_stack, stage_res = marchmap(
+                x0_mat, np.hstack(theta_cols), np.hstack(u_cols),
+                np.hstack(h_cols))
+            self._check_converged(stage_res)
 
             # map стыкует выходы шутов горизонтально: блок шута j — столбцы
             # [j*n_elems*(...), (j+1)*n_elems*(...))
-            x_stack = np.asarray(raw[0])       # (nx, G*n_elems)
-            Psi_stack = np.asarray(raw[1])     # (nx, G*n_elems*nx)
-            Gamma_stack = np.asarray(raw[2])   # (nx, G*n_elems*np)
+            x_stack = np.asarray(x_stack)         # (nx, G*n_elems)
+            Psi_stack = np.asarray(Psi_stack)     # (nx, G*n_elems*nx)
+            Gamma_stack = np.asarray(Gamma_stack)  # (nx, G*n_elems*np)
             for j, i in enumerate(idxs):
                 x_all, Psi_all, Gamma_all = self._unstack_mapaccum(
                     x_stack[:, j * n_elems:(j + 1) * n_elems],
@@ -424,11 +427,8 @@ class CollocationSystemJacobian(SystemJacobian):
         """Только состояние (nx, N)."""
         return self._march(c0, theta, t_eval, with_sens=False)
 
-    # JAX-варианты маршрутизируются на ту же реализацию: для коллокационного
+    # jax-имена маршрутизируются на ту же реализацию: для коллокационного
     # интегратора флаг use_jax не имеет значения
-    def get_jacobian_solution_jax(self, c0, theta, t_eval):
-        return self._march(c0, theta, t_eval, with_sens=True)
-
     def get_jacobian_solution_jax_batch(self, c0_list, theta, t_grids):
         theta = np.asarray(theta, dtype=float)[:self.n_theta]
         return self._march_batch_compiled(c0_list, theta, t_grids)

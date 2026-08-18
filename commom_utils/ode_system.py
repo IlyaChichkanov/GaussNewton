@@ -102,7 +102,10 @@ class SystemJacobian:
         self._IDX_S_C = slice(self._IDX_S_THETA.stop, self._IDX_S_THETA.stop + self.nx * self.nx)
 
         # Тождественное наблюдение h(x) = x: dh/dx = I, dh/dθ = 0 —
-        # позволяет полностью пропустить вычисление якобианов наблюдения
+        # позволяет полностью пропустить вычисление якобианов наблюдения.
+        # 20 — глубина структурного сравнения выражений в ca.is_equal
+        # (не допуск!); is_equal может бросить на несравнимых формах —
+        # тогда считаем наблюдение нетождественным.
         state_vec = vertcat(*state_list)
         try:
             self.identity_observation = (h_observ.shape == state_vec.shape
@@ -110,8 +113,10 @@ class SystemJacobian:
         except Exception:
             self.identity_observation = False
 
-        # Кэш map-версий функций наблюдения (ключ: (имя, N точек))
+        # Кэши: map-версии функций наблюдения (ключ: (имя, N точек))
+        # и vmap-обёртка интегратора расширенной системы
         self._obs_map_cache = {}
+        self._jax_vmap_full = None
 
     # ----------------------------------------------------------------------
     # Вспомогательные методы
@@ -145,31 +150,6 @@ class SystemJacobian:
         inp = self._get_inp_signals(t)
         return np.array(self._h_ca(*state, *inp, *theta)).flatten()
 
-    # def inverse_h(self, y, t, theta, x_guess=None, n_iter=1):
-    #     """
-    #     Приближённо решает уравнение h(x, theta) = y относительно x.
-    #     Параметры:
-    #         y: измерение (meas_len,)
-    #         t: время
-    #         theta: параметры (theta_len,)
-    #         x_guess: начальное приближение (state_len,). Если None, то нули.
-    #         n_iter: число итераций Гаусса–Ньютона (обычно 1-2).
-    #     Возвращает:
-    #         x: оценка состояния (state_len,)
-    #     """
-    #     if x_guess is None:
-    #         x_guess = np.zeros(self.nx)
-        
-    #     x = x_guess.copy()
-    #     for _ in range(n_iter):
-    #         dh_dx = self.dh_dx(x, t, theta)        # (meas_len, state_len)
-    #         h_val = self.h(x, t, theta)          # (meas_len,)
-    #         residual = y - h_val
-    #         # Решаем линейную систему (least squares)
-    #         delta_x = np.linalg.lstsq(dh_dx, residual, rcond=None)[0]
-    #         x = x + delta_x
-    #     return x
-    
     def inverse_h(self, y, t, theta, x_guess=None, n_iter=1):
         """
         Приближённо решает уравнение h(x, theta) = y относительно x.
@@ -330,24 +310,12 @@ class SystemJacobian:
                      rtol=self.RTOL, atol=self.ATOL)
         return np.array(sol).T
 
-    def get_jacobian_solution_jax(self, c0, theta, t_eval):
-        """JAX-интегрирование расширенной системы (состояние + чувствительности)."""
-        n = self.nx
-        p = self.n_theta
-
-        J0 = jnp.concatenate([jnp.zeros((n, p)).flatten(), jnp.eye(n).flatten()])
-        y0 = jnp.concatenate([jnp.array(c0), J0])
-
-        sol = odeint(self._variational_rhs_jax, y0, jnp.array(t_eval), *theta[:p],
-                     rtol=self.RTOL, atol=self.ATOL)
-        return np.array(sol).T
-
     def _vmapped_full_integrator(self):
         """JIT+vmap-обёртка интегратора расширенной системы (кэшируется).
 
         jax.jit сам перекомпилирует при смене формы (число шутов, длина сетки).
         """
-        if getattr(self, '_jax_vmap_full', None) is None:
+        if self._jax_vmap_full is None:
             n, p = self.nx, self.n_theta
             J0 = jnp.concatenate([jnp.zeros(n * p), jnp.eye(n).flatten()])
 
@@ -457,6 +425,8 @@ class SystemIntegrator(SystemJacobian):
         return np.array(self._f_ca(*state, *u, *theta)).ravel()
 
     def f_of_u_jax(self, state, t, u, theta):
+        # t не используется (u удерживается), но обязателен: odeint зовёт
+        # правую часть как f(y, t, *args)
         return jnp.array(self._f_jax_ca(*state, *u, *theta)[0]).flatten()
 
     def _check(self, c0, u, theta):
@@ -506,8 +476,8 @@ class SyntheticDataGenerator:
     system : object
         Система с методами:
             - dims() -> (state_len, theta_len, meas_len)
-            - get_solution(c0, theta, t_eval) -> array (state_len, n_t) (обычный режим)
-            - get_solution_jax(c0, theta, t_eval) -> array (n_t, state_len) (JAX-режим)
+            - get_solution / get_solution_jax (c0, theta, t_eval)
+              -> array (state_len, n_t)
             - h(state, t, theta) -> измерение в момент t
     sigma : float, default=0.01
         Стандартное отклонение аддитивного гауссовского шума.
@@ -569,14 +539,10 @@ class SyntheticDataGenerator:
 
         t_eval = np.linspace(t_start, t_end, n_measurements)
 
-        # Интегрирование
-        if self.use_jax:
-            # get_solution_jax возвращает (n_measurements, state_len)
-            solution = self.system.get_solution_jax(c0_true, theta, t_eval)
-        else:
-            # get_solution возвращает (state_len, n_measurements)
-            sol = self.system.get_solution(c0_true, theta, t_eval)
-            solution = sol  # приводим к (n_measurements, state_len)
+        # Обе версии интегратора возвращают (state_len, n_measurements)
+        integrate = (self.system.get_solution_jax if self.use_jax
+                     else self.system.get_solution)
+        solution = integrate(c0_true, theta, t_eval)
 
         # Добавляем шум к состояниям
         noise = self.sigma * np.random.normal(size=(self.state_len, n_measurements))
@@ -668,8 +634,12 @@ class MHESyntheticDataGenerator:
         Returns:
             tuple: (t, u, full_states, measured_states)
         """
-        if sigma is None:
-            sigma = [0] * self.meas_dim
+        # sigma: скаляр (один на все каналы) или вектор (meas_dim,);
+        # прежний дефолт [0]*meas_dim падал бы на sigma**2 (list ** int)
+        sigma = np.atleast_1d(np.asarray(
+            0.0 if sigma is None else sigma, dtype=float))
+        if sigma.size == 1:
+            sigma = np.full(self.meas_dim, sigma[0])
         # Get control inputs at each time point
         u = np.zeros((len(t), self.control_dim))
         for i, ti in enumerate(t):
@@ -744,14 +714,17 @@ class MHESyntheticDataGenerator:
         return t_windows, u_windows, meas_windows, full_windows
     
 
-def check_system_ok(system_ode : ODESystem):
+def check_system_ok(system_ode: ODESystem):
+    """Дешёвая проверка согласованности модели: компиляция + число входов.
 
+    Сама компиляция SystemJacobian уже валидирует размерности символов;
+    отдельно проверяем только то, что она проверить не может — что
+    get_input_signals возвращает ровно nu сигналов.
+    """
     system = SystemJacobian(system_ode)
-    assert system.nu == len(system_ode.get_input_signals(0))
-    if not hasattr(system, 'dims'):
-        raise AttributeError("system должен иметь метод dims()")
-
-    if not hasattr(system, 'h'):
-        raise AttributeError("system должен иметь метод h(state, t, theta)")
-    
+    n_inp = len(system_ode.get_input_signals(0))
+    if system.nu != n_inp:
+        raise ValueError(
+            f"{type(system_ode).__name__}: объявлено nu={system.nu}, но "
+            f"get_input_signals(t) возвращает {n_inp} сигналов")
     return True
