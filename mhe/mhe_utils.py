@@ -167,7 +167,6 @@ def run_mhe_estimation(
                 state_sequence[0], control_sequence[0], initial_theta
             )
             P_aug = updater.get_augmented_info_matrix()   # начальная P
-            first_window = False
         else:
             u_seq = [control_sequence_prev[i] for i in range(L)]
             x_seq = [prev_sim_x_est[i] for i in range(L + 1)]
@@ -207,6 +206,11 @@ def run_mhe_estimation(
 
         theta_prior = theta_opt
         prev_sim_x_est = sim_x_est.copy()
+        # Флаг снимается ТОЛЬКО после успешного окна, вместе с prev_sim_x_est.
+        # Раньше он снимался сразу в if-ветке, и если окно не решалось (status
+        # != 0 -> continue), следующая итерация уходила в else с
+        # prev_sim_x_est = None -> TypeError: 'NoneType' is not subscriptable.
+        first_window = False
 
         result = MheIterationResult(
             t_batch=t_batch,
