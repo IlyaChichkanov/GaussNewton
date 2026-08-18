@@ -80,6 +80,31 @@ class SensitivityTrajectory:
         return SensitivityTrajectory(self.x[:m], self.S_theta[:m], self.S_c[:m])
 
 
+def initial_flat_row(c0, n_theta):
+    """Начальное расширенное состояние в плоском layout.
+
+    [c0; S_theta(t0) = 0; S_c(t0) = I] — начальные условия вариационных
+    уравнений и рекурсий коллокаций. Раньше эта строка была написана в
+    четырёх местах (ode_system x2, collocation x2), каждый раз заново
+    вспоминая порядок блоков.
+    """
+    c0 = np.asarray(c0, dtype=float)
+    nx = c0.shape[0]
+    return np.concatenate([c0, np.zeros(nx * n_theta), np.eye(nx).ravel()])
+
+
+def split_row(y, nx, n_theta):
+    """Одна точка плоского layout -> (x, S_theta, S_c) — точечный unpack.
+
+    Только срезы и reshape, поэтому работает и с numpy-, и с jax-массивами
+    (правые части вариационных уравнений зовут её под трассировкой).
+    """
+    end_theta = nx + nx * n_theta
+    return (y[:nx],
+            y[nx:end_theta].reshape((nx, n_theta)),
+            y[end_theta:end_theta + nx * nx].reshape((nx, nx)))
+
+
 
 def group_by_grid_length(t_grids):
     """Индексы шутов, сгруппированные по длине временной сетки.

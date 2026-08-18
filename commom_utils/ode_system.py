@@ -9,7 +9,8 @@ from abc import abstractmethod
 from typing import NamedTuple
 from jaxadi import convert
 
-from commom_utils.sensitivity import group_by_grid_length
+from commom_utils.sensitivity import (group_by_grid_length, initial_flat_row,
+                                      split_row)
 
 
 class Dims(NamedTuple):
@@ -96,11 +97,6 @@ class SystemJacobian:
         self._f_x_ca = Function('J_x', [*state_list, *inp_list, *theta_list], [J_x])
         self._f_x_jax_ca = convert(self._f_x_ca, compile=True)
 
-        # Слайсы блоков S_theta и S_c внутри плоского расширенного состояния
-        # [x; S_theta.flatten(); S_c.flatten()] — см. commom_utils/sensitivity.py
-        self._IDX_S_THETA = slice(self.nx, self.nx + self.nx * self.n_theta)
-        self._IDX_S_C = slice(self._IDX_S_THETA.stop, self._IDX_S_THETA.stop + self.nx * self.nx)
-
         # Тождественное наблюдение h(x) = x: dh/dx = I, dh/dθ = 0 —
         # позволяет полностью пропустить вычисление якобианов наблюдения.
         # 20 — глубина структурного сравнения выражений в ca.is_equal
@@ -141,6 +137,28 @@ class SystemJacobian:
     def dims(self):
         """Размерности задачи: (nx, n_theta, n_obs)."""
         return Dims(self.nx, self.n_theta, self.n_obs)
+
+    def _inp_on_times(self, t_flat):
+        """Входные сигналы на векторе времени -> (len(t_flat), nu).
+
+        Быстрый путь — один вызов get_input_signals с массивом времени
+        (интерполяторы обычно его принимают); если функция входов массив не
+        переваривает — семантически эквивалентный обход по точкам.
+        Общий помощник обоих батчевых потребителей: observation_batch и
+        подготовки узловых входов в коллокациях.
+        """
+        t_flat = np.asarray(t_flat)
+        n = t_flat.size
+        if self.nu == 0:
+            return np.zeros((n, 0))
+        try:
+            sigs = self.model.get_input_signals(t_flat)
+            return np.array([np.asarray(s, dtype=float).reshape(n)
+                             for s in sigs]).T
+        except Exception:
+            return np.array(
+                [np.asarray(self._get_inp_signals(t), dtype=float)
+                 .reshape(self.nu) for t in t_flat]).reshape(n, self.nu)
 
     # ----------------------------------------------------------------------
     # Методы для обычного режима (NumPy)
@@ -226,13 +244,7 @@ class SystemJacobian:
         Возвращает: h (N, n_obs), dh_dx (N, n_obs, nx), dh_dtheta (N, n_obs, nθ).
         """
         n_points = states.shape[1]
-        try:
-            # Интерполяторы обычно принимают массив времени целиком
-            inp = np.array([np.asarray(s, dtype=float).reshape(n_points)
-                            for s in self.model.get_input_signals(np.asarray(t_array))]).T
-        except Exception:
-            inp = np.array([np.asarray(self._get_inp_signals(t), dtype=float).reshape(self.nu)
-                            for t in t_array]).reshape(n_points, self.nu)
+        inp = self._inp_on_times(t_array)
 
         # Каждый скалярный вход map-функции — строка (1, N); theta транслируется
         args = [states[i, :].reshape(1, n_points) for i in range(self.nx)]
@@ -256,14 +268,18 @@ class SystemJacobian:
         return jnp.array(self._f_jax_ca(*y, *inp, *theta)[0].flatten())
 
     def df_dtheta_jax(self, state, t, theta):
-        """JAX-совместимый якобиан по параметрам."""
+        """JAX-совместимый якобиан по параметрам, (nx, n_theta)."""
         inp = self._get_inp_signals(t)
         return jnp.array(self._f_theta_jax_ca(*state, *inp, *theta))[0]
 
     def df_dx_jax(self, state, t, theta):
-        """JAX-совместимый якобиан по состоянию."""
+        """JAX-совместимый якобиан по состоянию, (nx, nx).
+
+        jaxadi отдаёт список выходов — без [0] здесь была бы форма
+        (1, nx, nx), и матумножение на неё молча давало лишнюю ось.
+        """
         inp = self._get_inp_signals(t)
-        return jnp.array(self._f_x_jax_ca(*state, *inp, *theta))
+        return jnp.array(self._f_x_jax_ca(*state, *inp, *theta))[0]
 
     # ----------------------------------------------------------------------
     # Интегрирование
@@ -282,11 +298,8 @@ class SystemJacobian:
 
     def get_jacobian_solution(self, c0, theta, t_eval):
         """Интегрирование расширенной системы (состояние + чувствительности) (обычный режим)."""
-        n = self.nx
         p = self.n_theta
-
-        J0 = np.concatenate([np.zeros((n, p)).flatten(), np.eye(n).flatten()])
-        y0 = np.concatenate([c0, J0])
+        y0 = initial_flat_row(c0, p)
 
         def full_ode(t, y):
             return self._variational_rhs(y, t, theta[:p])
@@ -317,10 +330,11 @@ class SystemJacobian:
         """
         if self._jax_vmap_full is None:
             n, p = self.nx, self.n_theta
-            J0 = jnp.concatenate([jnp.zeros(n * p), jnp.eye(n).flatten()])
+            # Хвост начальной строки (S_theta = 0, S_c = I) — константа
+            sens0 = jnp.array(initial_flat_row(np.zeros(n), p)[n:])
 
             def integrate_one(c0, t_grid, theta):
-                y0 = jnp.concatenate([c0, J0])
+                y0 = jnp.concatenate([c0, sens0])
                 return odeint(self._variational_rhs_jax, y0, t_grid, *theta,
                               rtol=self.RTOL, atol=self.ATOL)
 
@@ -368,33 +382,38 @@ class SystemJacobian:
         на каждый шаг интегратора.
         """
         n, p = self.nx, self.n_theta
-        x = y[:n]
-        S_theta = y[self._IDX_S_THETA].reshape((n, p))
-        S_c = y[self._IDX_S_C].reshape((n, n))
+        x, S_theta, S_c = split_row(y, n, p)
 
         args = (*x, *self._get_inp_signals(t), *theta)
         dx = np.array(self._f_ca(*args)).ravel()
         f_x = np.array(self._f_x_ca(*args))
+        f_theta = np.array(self._f_theta_ca(*args))
+
         dS = f_x @ np.concatenate([S_theta, S_c], axis=1)
-        dS[:, :p] += np.array(self._f_theta_ca(*args))
         # layout плоский: сначала весь S_theta, потом весь S_c (C-order каждый),
         # поэтому склейку приходится снова разрезать, а не ravel'ить целиком
-        return np.concatenate([dx, dS[:, :p].ravel(), dS[:, p:].ravel()])
+        return np.concatenate([dx, (dS[:, :p] + f_theta).ravel(),
+                               dS[:, p:].ravel()])
 
     def _variational_rhs_jax(self, y, t, *theta):
-        """Правая часть расширенной системы (jax) — та же схема."""
-        n, p = self.nx, self.n_theta
-        x = y[:n]
-        S_theta = y[self._IDX_S_THETA].reshape((n, p))
-        S_c = y[self._IDX_S_C].reshape((n, n))
+        """Правая часть расширенной системы (jax) — та же схема.
 
-        # df_dx_jax отдаёт (1, n, n) — приводим к (n, n) явно, а не полагаемся
-        # на broadcast (раньше он молча давал (1, n, p) на выходе матумножения)
-        f_x = self.df_dx_jax(x, t, theta).reshape((n, n))
-        dx = self.f_jax(x, t, *theta)
+        Как и numpy-версия, зовёт скомпилированные функции напрямую с общим
+        args: путь через обёртки f_jax/df_dx_jax/df_dtheta_jax вычислял бы
+        входные сигналы трижды за вызов (под jit это цена трассировки, но
+        пара версий обязана читаться как одно и то же дважды).
+        """
+        n, p = self.nx, self.n_theta
+        x, S_theta, S_c = split_row(y, n, p)
+
+        args = (*x, *self._get_inp_signals(t), *theta)
+        dx = jnp.array(self._f_jax_ca(*args)[0].flatten())
+        f_x = jnp.array(self._f_x_jax_ca(*args))[0]
+        f_theta = jnp.array(self._f_theta_jax_ca(*args))[0]
+
         dS = f_x @ jnp.concatenate([S_theta, S_c], axis=1)
-        dS_theta = dS[:, :p] + self.df_dtheta_jax(x, t, theta)
-        return jnp.concatenate([dx, dS_theta.flatten(), dS[:, p:].flatten()])
+        return jnp.concatenate([dx, (dS[:, :p] + f_theta).flatten(),
+                                dS[:, p:].flatten()])
 
 
 class SystemIntegrator(SystemJacobian):
