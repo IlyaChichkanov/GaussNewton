@@ -27,7 +27,7 @@ from gauss_newton.normal_equations import (confidence_intervals,
                                           normal_equations_of)
 
 
-def gn_step(ne, mu, lam, lambda_reg=0.0):
+def gn_step(ne, mu, lam, lambda_reg=0.0, lam_dual=None):
     """Шаг из mu-регуляризованной седловой системы + pred для gain ratio.
 
     Решается седловая система (mu-регуляризованная ККТ), плюс pred:
@@ -39,20 +39,37 @@ def gn_step(ne, mu, lam, lambda_reg=0.0):
     pred = delta^T (g_eff + D delta) >= 0 — предсказанное моделью уменьшение
     Phi_mu (вывод в adaptive_regularization.ipynb, §3); pred <= 0 возможен
     только при численном сбое и трактуется циклом как отказ шага.
+
+    lam_dual — оценка множителей Лагранжа для augmented-Lagrangian-режима
+    (эксперименты: adaptive_regularization.ipynb, раздел про AL). При
+    заданном lam_dual RHS блока ограничений сдвигается на -mu*lam_dual —
+    это шаг ГН для L_A = ||R||^2 - 2 lam_dual^T R_G + (1/mu)||R_G||^2
+    (у нас R_G = -G), в g_eff добавляется -J_G^T lam_dual, формула pred
+    не меняется. Возврат расширяется до (delta, pred, nu), где nu —
+    двойственное решение седловой системы: nu = lam_dual + (J_G delta -
+    R_G)/mu, то есть готовое первопорядковое обновление множителей.
+    При lam_dual=None возврат прежний (delta, pred) и числа побитово те же.
     """
     n = ne.H.shape[0]
     # floor на диагонали: столбец, к которому невязки локально нечувствительны,
     # иначе получил бы нулевое демпфирование и произвольно большой шаг
     D = lambda_reg * speye(n) + lam * diags(np.maximum(ne.H.diagonal(), 1e-10))
+    nu = None
     if ne.n_cont > 0:
         K = vstack([hstack([ne.H + D, ne.J_G.T]),
                     hstack([ne.J_G, -mu * speye(ne.n_cont)])]).tocsr()
-        delta = spsolve(K, np.concatenate([ne.g, ne.R_G]))[:n]
+        rhs_G = ne.R_G if lam_dual is None else ne.R_G - mu * lam_dual
+        sol = spsolve(K, np.concatenate([ne.g, rhs_G]))
+        delta, nu = sol[:n], sol[n:]
         g_eff = ne.g + (1.0 / mu) * (ne.J_G.T @ ne.R_G)
+        if lam_dual is not None:
+            g_eff = g_eff - ne.J_G.T @ lam_dual
     else:
         g_eff = ne.g
         delta = spsolve((ne.H + D).tocsr(), ne.g)
     pred = float(delta @ g_eff + delta @ (D @ delta))
+    if lam_dual is not None:
+        return delta, pred, nu
     return delta, pred
 
 
