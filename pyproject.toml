@@ -15,6 +15,9 @@ dependencies = [
     "pandas>=2.2.0",
     "plotly>=6.9.0",
     "pytest>=9.0.2",
+    # для experiments/real_data_cars/mhe_test_rosbag.ipynb: он читает
+    # sda_config/control.param.yaml из соседнего репозитория SDA
+    "pyyaml>=6.0.3",
     "scipy>=1.15.3",
     "tqdm>=4.67.3",
 ]

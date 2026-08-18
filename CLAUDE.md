@@ -101,8 +101,15 @@ multiple shooting. Два интегратора чувствительност�
 - `NOTATION.md` — таблица «теория ↔ код». Ноутбуки приведены к записи кода:
   где было `H` (матрица плана) и `G`, теперь `J` и `J_G`; `H` осталось только
   за нормальной матрицей `JᵀJ`.
-- `experiments/` — реальные данные и ноутбуки (CSV в .gitignore);
-  `experiments/data_utils.py` — `LogReaderV2`, `theta_to_physical`.
+- `experiments/` — ноутбуки-прогоны, разложены по назначению:
+  `sintetic_data/` (gauss_newton_test, mhe_test — переехали из `gauss_newton/`
+  и `mhe/`), `real_data_cars/` (Ceed/Voyah + rosbag-ноутбуки),
+  `datasets/` (сырые CSV и CAN-логи, ~215 МБ, ВНЕ git — трекается только
+  `datasets/README.md`). `experiments/data_utils.py` остаётся в корне
+  `experiments/` — импорт `from experiments.data_utils import LogReaderV2`.
+  Каждый ноутбук открывается bootstrap-ячейкой: подъём от cwd до
+  `pyproject.toml` → `REPO`, `DATASETS` (переопределяется `GN_DATASETS`),
+  `CODEGEN = REPO/tmp_generated` (кодоген acados в одном месте).
 - `pytests/` — `uv run pytest pytests/` (68 passed, 2 skipped без acados):
   gauss_newton_test, collocation_test, adaptive_test, accumulated_test,
   collocation_accum_test, systems_smoke_test. Две сверки с ВНЕШНИМ эталоном:
@@ -160,6 +167,17 @@ multiple shooting. Два интегратора чувствительност�
 
 ## Грабли (проверено на практике)
 
+- `experiments/datasets/*` в .gitignore именно СО ЗВЁЗДОЧКОЙ: git не спускается
+  внутрь исключённого каталога, и при форме `datasets/` строку
+  `!datasets/README.md` не переоткрыть. Правило `experiments/*.csv` не
+  рекурсивно — при переносе данных вглубь оно перестаёт их ловить (проверять
+  `git check-ignore -v`, иначе 215 МБ уедут в историю).
+- `experiments/real_data_cars/mhe_test_rosbag.ipynb` НАМЕРЕННО затеняет наш
+  пакет `mhe` пакетом из SDA (`sys.path.insert(0, CODEGEN_ROOT)` в первой
+  ячейке). Общую bootstrap-ячейку туда добавлять нельзя — она перебьёт порядок;
+  и ядро для него должно быть свежим, не общим с `sintetic_data/mhe_test.ipynb`.
+  Кэш солверов в SDA может быть собран другой версией acados — тогда загрузка
+  падает с `KeyError: 'code_gen_opts'`, лечится `MHE_NB_FORCE_REBUILD=1`.
 - `jax.experimental.odeint`: допуски по умолчанию 1.4e-8 — главный тормоз;
   всегда передавать `rtol=self.RTOL, atol=self.ATOL`. Исключение —
   `SystemIntegrator.step_jax` (симуляция MPC): там допуски по умолчанию
