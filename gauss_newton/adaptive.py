@@ -12,7 +12,8 @@ gauss_newton/normal_equations.py — как они получены (через 
 - mu (обратный вес невязок стыковки: шаг — это ГН для
   Phi_mu = ||R||^2 + (1/mu)||R_G||^2) стартует по кривизне
   ||J_G||_F^2 / tr(H) и ужесточается по Пауэллу — только когда невязка
-  стыковки не падает сама;
+  стыковки не падает сама И измерительная невязка застопорилась
+  (гейт rss_stall_tol);
 - шаг принимается по той же Phi_mu, для которой посчитан (rho > 0),
   а не по '<= 1.1*best';
 - есть остановка (серия отказов / стагнация / pred ~ 0), поэтому n_iter —
@@ -26,7 +27,7 @@ from gauss_newton.normal_equations import (confidence_intervals,
                                           normal_equations_of)
 
 
-def gn_step(ne, mu, lam, lambda_reg=0.0):
+def gn_step(ne, mu, lam, lambda_reg=0.0, lam_dual=None):
     """Шаг из mu-регуляризованной седловой системы + pred для gain ratio.
 
     Решается седловая система (mu-регуляризованная ККТ), плюс pred:
@@ -38,27 +39,44 @@ def gn_step(ne, mu, lam, lambda_reg=0.0):
     pred = delta^T (g_eff + D delta) >= 0 — предсказанное моделью уменьшение
     Phi_mu (вывод в adaptive_regularization.ipynb, §3); pred <= 0 возможен
     только при численном сбое и трактуется циклом как отказ шага.
+
+    lam_dual — оценка множителей Лагранжа для augmented-Lagrangian-режима
+    (эксперименты: adaptive_regularization.ipynb, раздел про AL). При
+    заданном lam_dual RHS блока ограничений сдвигается на -mu*lam_dual —
+    это шаг ГН для L_A = ||R||^2 - 2 lam_dual^T R_G + (1/mu)||R_G||^2
+    (у нас R_G = -G), в g_eff добавляется -J_G^T lam_dual, формула pred
+    не меняется. Возврат расширяется до (delta, pred, nu), где nu —
+    двойственное решение седловой системы: nu = lam_dual + (J_G delta -
+    R_G)/mu, то есть готовое первопорядковое обновление множителей.
+    При lam_dual=None возврат прежний (delta, pred) и числа побитово те же.
     """
     n = ne.H.shape[0]
     # floor на диагонали: столбец, к которому невязки локально нечувствительны,
     # иначе получил бы нулевое демпфирование и произвольно большой шаг
     D = lambda_reg * speye(n) + lam * diags(np.maximum(ne.H.diagonal(), 1e-10))
+    nu = None
     if ne.n_cont > 0:
         K = vstack([hstack([ne.H + D, ne.J_G.T]),
                     hstack([ne.J_G, -mu * speye(ne.n_cont)])]).tocsr()
-        delta = spsolve(K, np.concatenate([ne.g, ne.R_G]))[:n]
+        rhs_G = ne.R_G if lam_dual is None else ne.R_G - mu * lam_dual
+        sol = spsolve(K, np.concatenate([ne.g, rhs_G]))
+        delta, nu = sol[:n], sol[n:]
         g_eff = ne.g + (1.0 / mu) * (ne.J_G.T @ ne.R_G)
+        if lam_dual is not None:
+            g_eff = g_eff - ne.J_G.T @ lam_dual
     else:
         g_eff = ne.g
         delta = spsolve((ne.H + D).tocsr(), ne.g)
     pred = float(delta @ g_eff + delta @ (D @ delta))
+    if lam_dual is not None:
+        return delta, pred, nu
     return delta, pred
 
 
 def run_optimization_adaptive(problem, theta_full, n_iter=40,
                               lam0=1e-3, lambda_reg=0.0,
                               mu_rule='curvature', mu_dec=0.5,
-                              viol_target=0.25, kappa=0.1,
+                              viol_target=0.25, rss_stall_tol=0.99, kappa=0.1,
                               mu_min=1e-8, mu_max=1e8,
                               rho_accept=0.0, max_rejects=8,
                               track_covariance=True, verbose=False):
@@ -70,9 +88,16 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
     Параметры безразмерны, дефолты проверены на ЛВ/Аттракторе/реальных данных:
     - lam0: стартовый демпфер, дальше управляется gain ratio;
     - mu_rule: 'curvature' (рекомендуется) — старт ||J_G||_F^2/tr(H),
-      ужесточение mu*mu_dec, когда ||R_G||^2 > viol_target*||R_G||^2_prev;
+      ужесточение mu*mu_dec, когда ||R_G||^2 > viol_target*||R_G||^2_prev
+      И измерительная невязка застопорилась (см. rss_stall_tol);
       'ratio' — mu = ||R_G||^2/(kappa*||R||^2) (хуже на реальных данных,
       см. ноутбук §8);
+    - rss_stall_tol: гейт Пауэлла — mu ужимается только когда
+      ||R||^2 > rss_stall_tol*||R||^2_prev, т.е. измерения уже выжаты.
+      Без гейта mu утаптывается на ранних итерациях (rss падает на порядки,
+      стыковка колеблется), ограничения начинают доминировать и решение
+      запирается на консистентной траектории вдали от измерений — Attractor
+      при N_shoot=5 сходится с гейтом и не сходится без него;
     - rho_accept: порог принятия шага по gain ratio;
     - track_covariance: считать доверительные интервалы theta по ходу
       (для plot_solution), стоит один splu на итерацию.
@@ -103,7 +128,7 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
         mu = float(np.clip(ne.mu_curvature(), mu_min, mu_max))
     else:
         mu = mu_ratio(ne)
-    prev_cont = ne.cont_sq()
+    prev_cont, prev_rss = ne.cont_sq(), ne.rss
 
     hist = dict(theta=[], cost=[], mu=[], lam=[], r_meas=[], r_cont=[],
                 ci_low=[], ci_high=[], accepted=[], n_solves=1)
@@ -146,11 +171,14 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
             lam = max(lam * max(1 / 3, 1 - (2 * rho - 1) ** 3), 1e-12)
             nu_esc, rejects = 2.0, 0
             if ne.n_cont > 0:
-                cont = ne.cont_sq()
+                cont, rss = ne.cont_sq(), ne.rss
                 if mu_rule == 'curvature':
-                    if cont > viol_target * prev_cont:  # стыковка сама не падает
-                        mu = max(mu * mu_dec, mu_min)   # -> ужесточаем штраф
-                    prev_cont = cont
+                    # Пауэлл с гейтом: ужесточаем штраф, только когда стыковка
+                    # сама не падает И измерения уже выжаты — пока rss падает,
+                    # mu не трогаем (иначе преждевременное запирание, docstring)
+                    if cont > viol_target * prev_cont and rss > rss_stall_tol * prev_rss:
+                        mu = max(mu * mu_dec, mu_min)
+                    prev_cont, prev_rss = cont, rss
                 else:
                     mu = mu_ratio(ne)
             hist['accepted'].append(it)

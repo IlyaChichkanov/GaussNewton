@@ -102,6 +102,47 @@ def test_step_matches_dense_saddle_solve():
     assert pred > 0
 
 
+def test_step_with_multipliers_matches_dense_saddle_solve():
+    """gn_step(..., lam_dual): AL-сдвиг правой части и возврат nu.
+
+    Эталон внешний, как и выше: та же плотная седловая матрица, RHS блока
+    ограничений сдвинут на -mu*lam_dual; nu — двойственная часть решения.
+    Плюс инвариант: при lam_dual = 0 шаг побитово совпадает с обычным.
+    """
+    config = SYSTEMS_CONFIG["LotkaVolterra"]
+    _, t_meas, meas = generate_data(config)
+    prob = make_problem(config, t_meas, meas)
+    theta_full = prob.make_full_theta(config["theta_init"])
+    J, R, J_G, R_G = prob.solve(theta_full)
+
+    mu, lam, lam_reg = 1.0, 1e-3, 1e-6
+    ne = NormalEquations.from_jacobian(J, R, J_G, R_G)
+    rng = np.random.default_rng(1)
+    lam_dual = rng.standard_normal(ne.n_cont)
+
+    delta, pred, nu = gn_step(ne, mu, lam, lam_reg, lam_dual=lam_dual)
+
+    H = ne.H.toarray()
+    n, m = H.shape[0], J_G.shape[0]
+    D = lam_reg * np.eye(n) + lam * np.diag(np.maximum(np.diag(H), 1e-10))
+    K = np.block([[H + D, J_G.toarray().T],
+                  [J_G.toarray(), -mu * np.eye(m)]])
+    sol_ref = np.linalg.solve(K, np.concatenate([ne.g, R_G - mu * lam_dual]))
+
+    scale = np.abs(sol_ref).max()
+    assert np.abs(delta - sol_ref[:n]).max() < 1e-9 * scale
+    assert np.abs(nu - sol_ref[n:]).max() < 1e-9 * scale
+    # nu = lam_dual + (J_G delta - R_G)/mu — первопорядковое обновление
+    nu_formula = lam_dual + (J_G @ delta - R_G) / mu
+    assert np.abs(nu - nu_formula).max() < 1e-8 * max(np.abs(nu).max(), 1.0)
+
+    delta0, pred0 = gn_step(ne, mu, lam, lam_reg)
+    delta_z, pred_z, _ = gn_step(ne, mu, lam, lam_reg,
+                                 lam_dual=np.zeros(ne.n_cont))
+    assert np.array_equal(delta0, delta_z)
+    assert pred0 == pred_z
+
+
 def test_pred_positive_across_regimes():
     config = SYSTEMS_CONFIG["LotkaVolterra"]
     _, t_meas, meas = generate_data(config)
@@ -139,6 +180,32 @@ def test_identification_adaptive(system_name):
     # mu стартует по кривизне и не растёт при отказах
     assert hist["mu"][0] > 0
     assert hist["mu"][-1] <= hist["mu"][0] + 1e-15
+
+
+# ---------------------------------------------------------------------------
+# Гейт Пауэлла (rss_stall_tol): Аттрактор сходится и при МАЛОМ числе шутов
+# ---------------------------------------------------------------------------
+def test_attractor_converges_with_few_shoots():
+    """Attractor, N_shoot=5, theta0=0 — закрепляет гейт rss_stall_tol.
+
+    Без гейта mu утаптывается на ранних итерациях (rss ещё падает на порядки,
+    а стыковка колеблется), ограничения начинают доминировать, и решение
+    запирается на консистентной траектории вдали от измерений
+    (rel_err ~ 1.2, rss ~ 9e3 при r_cont ~ 1e-10). С гейтом тот же случай
+    сходится: rel_err ~ 3e-4, стыковка затягивается до ~1e-10.
+    """
+    config = dict(SYSTEMS_CONFIG["Attractor"], N_shoot=5)
+    _, t_meas, meas = generate_data(config)
+    prob = make_problem(config, t_meas, meas)
+    theta_full = prob.make_full_theta(config["theta_init"])
+
+    theta_opt, hist = run_optimization_adaptive(prob, theta_full, n_iter=80,
+                                                track_covariance=False)
+
+    err = rel_err(theta_opt, config["true_params"])
+    assert err < 1e-2, f"запирание на консистентной траектории: rel_err={err:.3e}"
+    # стыковка при этом дотянута штрафом, а не брошена
+    assert hist["r_cont"][-1] < 1e-6
 
 
 # ---------------------------------------------------------------------------

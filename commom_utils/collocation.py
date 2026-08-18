@@ -27,7 +27,8 @@ import numpy as np
 import casadi as ca
 
 from commom_utils.ode_system import SystemJacobian
-from commom_utils.sensitivity import group_by_grid_length
+from commom_utils.sensitivity import (SensitivityTrajectory,
+                                      group_by_grid_length, initial_flat_row)
 
 
 class RadauTables:
@@ -132,38 +133,36 @@ class CollocationSystemJacobian(SystemJacobian):
     # ------------------------------------------------------------------
     # Помощники, общие для одиночного и батчевого марша
     # ------------------------------------------------------------------
-    def _pack_row(self, x, S_th, S_c):
-        """Столбец выхода в контракте SystemJacobian.
-
-        Layout (C-order): [x (nx); J_theta.flatten() (nx*np); J_c.flatten()
-        (nx*nx)] — ровно то, что ждёт SensitivityTrajectory.unpack.
-        """
-        return np.concatenate([np.asarray(x, float), S_th.ravel(), S_c.ravel()])
-
     def _accumulate_sens(self, c0, x_all, Psi_all, Gamma_all, n_pts):
-        """Рекурсии чувствительностей по элементам -> выход в layout родителя.
+        """Рекурсии чувствительностей по элементам -> плоский layout родителя.
 
         S_c <- Psi_e S_c (S_c[0] = I), S_th <- Psi_e S_th + Gamma_e (S_th[0]=0).
         x_all: (nx, n_elems); Psi_all: (n_elems, nx, nx);
         Gamma_all: (n_elems, nx, np). Точки t_eval — концы каждого n_sub-го
-        элемента, поэтому столбец пишется раз в n_sub элементов.
+        элемента, поэтому точка записывается раз в n_sub элементов.
+        Порядок умножений в рекурсиях менять нельзя — он зафиксирован
+        regression_test'ом на 1e-10.
         """
         nx, n_theta = self.nx, self.n_theta
-        out = np.zeros((nx + nx * n_theta + nx * nx, n_pts))
-        S_th = np.zeros((nx, n_theta))
-        S_c = np.eye(nx)
-        out[:, 0] = self._pack_row(c0, S_th, S_c)
-        col = 1
+        S_th, S_c = np.zeros((nx, n_theta)), np.eye(nx)
+        xs, S_ths, S_cs = [np.asarray(c0, float)], [S_th], [S_c]
         for e in range(x_all.shape[1]):
             S_c = Psi_all[e] @ S_c
             S_th = Psi_all[e] @ S_th + Gamma_all[e]
             if (e + 1) % self.n_sub == 0:
-                out[:, col] = self._pack_row(x_all[:, e], S_th, S_c)
-                col += 1
-        return out
+                xs.append(np.asarray(x_all[:, e], float))
+                S_ths.append(S_th)
+                S_cs.append(S_c)
+        # len(xs) == n_pts по построению: (n_pts-1)*n_sub элементов дают
+        # n_pts-1 записей плюс начальная точка; формы проверит __post_init__
+        traj = SensitivityTrajectory(np.array(xs), np.array(S_ths),
+                                     np.array(S_cs))
+        return traj.pack()
 
     def _node_inputs(self, t_eval):
         """Входы u в узлах всех под-элементов сетки: (N-1, n_sub, K, nu)."""
+        # Массив нехешируем, поэтому ключ — его байты; безопасно, т.к. сюда
+        # t_eval всегда приходит уже нормализованным (asarray(..., float))
         key = (t_eval.tobytes(), self.n_sub)
         cached = self._node_inp_cache.get(key)
         if cached is not None:
@@ -177,20 +176,9 @@ class CollocationSystemJacobian(SystemJacobian):
         t_nodes = t_eval[:-1, None, None] + offs[None, :, :] * h_int[:, None, None]
         flat_t = t_nodes.ravel()
 
-        if nu == 0:
-            inp = np.zeros((n_int, self.n_sub, K, 0))
-        else:
-            try:
-                # Быстрый путь: get_input_signals векторизован по времени
-                sigs = self.model.get_input_signals(flat_t)
-                inp = np.array([np.asarray(s, dtype=float).reshape(flat_t.size)
-                                for s in sigs]).T
-            except Exception:
-                # Fallback: по точке за раз (семантически эквивалентен,
-                # просто медленнее — для входов, не принимающих массив t)
-                inp = np.array([np.asarray(self._get_inp_signals(t), dtype=float)
-                                .reshape(nu) for t in flat_t])
-            inp = inp.reshape(n_int, self.n_sub, K, nu)
+        # Общий помощник SystemJacobian (векторный вызов с fallback по точкам);
+        # при nu == 0 он отдаёт (len, 0) — reshape ниже не ветвится
+        inp = self._inp_on_times(flat_t).reshape(n_int, self.n_sub, K, nu)
 
         self._node_inp_cache[key] = inp
         return inp
@@ -199,10 +187,13 @@ class CollocationSystemJacobian(SystemJacobian):
     # Шаг элемента: rootfinder по стадиям + Psi/Gamma через теорему
     # о неявной функции (ca.jacobian дифференцирует сквозь rootfinder)
     # ------------------------------------------------------------------
-    def _build_step_functions(self):
-        if self._step_fns is not None:
-            return self._step_fns
+    def _stage_residual_fn(self):
+        """Символы шага и резидуал стадийных уравнений.
 
+        Phi(z; x_prev, theta, u, h) = z - A x_prev - h (B (x) I) F(z),
+        A = 1_K (x) I. Возвращает (syms, phi_fn), где syms — кортеж
+        (z, x_prev, theta, u_flat, h, step_param).
+        """
         K, nx, n_theta, nu = self.colloc.K, self.nx, self.n_theta, self.nu
 
         z = ca.MX.sym('z', K * nx)
@@ -211,21 +202,25 @@ class CollocationSystemJacobian(SystemJacobian):
         u_flat = ca.MX.sym('u_flat', K * nu)
         h = ca.MX.sym('h')
 
-        # F(z): правая часть во всех стадиях (SX-функция _f_ca на MX-аргументах)
-        F_stages = []
-        for k in range(K):
-            xk = [z[k * nx + i] for i in range(nx)]
-            uk = [u_flat[k * nu + j] for j in range(nu)]
-            th = [theta[i] for i in range(n_theta)]
-            F_stages.append(self._f_ca(*xk, *uk, *th))
-        F = ca.vcat(F_stages)
+        # F(z): правая часть во всех стадиях (SX-функция _f_ca на MX-аргументах);
+        # vertsplit режет стековые векторы на K блоков стадий, дальше блок
+        # индексируется по своим осям — без сквозной арифметики k*nx + i;
+        # theta одна на все стадии и раскладывается один раз
+        z_stages = ca.vertsplit(z, nx)
+        u_stages = ca.vertsplit(u_flat, nu) if nu else [u_flat] * K
+        th = [theta[i] for i in range(n_theta)]
+        F = ca.vcat([self._f_ca(*(zk[i] for i in range(nx)),
+                                *(uk[j] for j in range(nu)), *th)
+                     for zk, uk in zip(z_stages, u_stages)])
 
-        # Резидуал стадийных уравнений: Phi = z - A x_prev - h (B (x) I) F(z)
         B_kron = ca.DM(self._B_kron)
         step_param = ca.vertcat(x_prev, theta, u_flat, h)
         Phi = z - ca.repmat(x_prev, K, 1) - h * ca.mtimes(B_kron, F)
         phi_fn = ca.Function('colloc_res', [z, step_param], [Phi])
+        return (z, x_prev, theta, u_flat, h, step_param), phi_fn
 
+    def _make_rootfinder(self, phi_fn):
+        """Ньютон по стадиям: опции сходимости и построение rootfinder."""
         rf_opts = {
             'abstol': self.newton_tol,       # невязка: max|Phi| < tol
             'abstolStep': self.newton_tol,   # шаг: max|dz| < tol (критерии - ИЛИ);
@@ -237,9 +232,24 @@ class CollocationSystemJacobian(SystemJacobian):
                                              # по stage_res, без C++ дампов
         }
         rf_opts.update(self.rootfinder_options)
-        stage_solver = ca.rootfinder('colloc_rf', self.rootfinder_plugin,
-                                     phi_fn, rf_opts)
+        return ca.rootfinder('colloc_rf', self.rootfinder_plugin,
+                             phi_fn, rf_opts)
 
+    def _build_step_functions(self):
+        """Шаг элемента как пара CasADi-функций (лениво, с кэшем).
+
+        step_sens: (x_prev, theta, u, h) -> (x_next, Psi, Gamma, stage_res);
+        step_x — то же без чувствительностей. Psi и Gamma — производные
+        выхода rootfinder по теореме о неявной функции (IND).
+        """
+        if self._step_fns is not None:
+            return self._step_fns
+
+        (_, x_prev, theta, u_flat, h, step_param), phi_fn = \
+            self._stage_residual_fn()
+        stage_solver = self._make_rootfinder(phi_fn)
+
+        K, nx = self.colloc.K, self.nx
         z0 = ca.repmat(x_prev, K, 1)          # производная решения по z0 нулевая
         z_sol = stage_solver(z0, step_param)
         # Радо IIA stiffly accurate (tau_K = 1): последний узел совпадает
@@ -315,19 +325,16 @@ class CollocationSystemJacobian(SystemJacobian):
         # nan -> inf, чтобы и расходимость, и NaN попали в ветку отказа
         clean = np.nan_to_num(stage_res, nan=np.inf)
         worst = float(np.max(clean))
-        if worst > self.RES_SAFETY * self.newton_tol:
-            n_bad = int(np.sum(clean > self.RES_SAFETY * self.newton_tol))
-            raise self._newton_fail(worst, n_bad, stage_res.size)
-
-    def _newton_fail(self, worst, n_bad, n_total):
-        return RuntimeError(
-            f"Коллокации: Ньютон по стадиям не сошёлся в {n_bad} из {n_total} "
-            f"элементов (max масштабированной невязки {worst:.2e} > "
-            f"{self.RES_SAFETY * self.newton_tol:.1e}; "
-            f"max_iter={self.newton_maxiter}). Увеличьте n_sub (шаг элемента "
-            f"h = dt/n_sub станет меньше), ослабьте newton_tol или поднимите "
-            f"newton_maxiter. В пробной точке оптимизации это штатный отказ "
-            f"шага — цикл его откатит.")
+        limit = self.RES_SAFETY * self.newton_tol
+        if worst > limit:
+            n_bad = int(np.sum(clean > limit))
+            raise RuntimeError(
+                f"Коллокации: Ньютон по стадиям не сошёлся в {n_bad} из "
+                f"{stage_res.size} элементов (max масштабированной невязки "
+                f"{worst:.2e} > {limit:.1e}; max_iter={self.newton_maxiter}). "
+                f"Увеличьте n_sub (шаг элемента h = dt/n_sub станет меньше), "
+                f"ослабьте newton_tol или поднимите newton_maxiter. В пробной "
+                f"точке оптимизации это штатный отказ шага — цикл его откатит.")
 
     # ------------------------------------------------------------------
     # Марш по сетке: один шут и батч шутов
@@ -339,61 +346,79 @@ class CollocationSystemJacobian(SystemJacobian):
         theta_cols, u_cols, h_cols = self._march_inputs(theta, t_eval)
 
         march = self._get_mapaccum(n_elems, with_sens)
-        raw = march(c0, theta_cols, u_cols, h_cols)
 
         if not with_sens:
-            x_all = np.asarray(raw[0])                         # (nx, n_elems)
-            self._check_converged(raw[1])
+            x_stack, stage_res = march(c0, theta_cols, u_cols, h_cols)
+            self._check_converged(stage_res)
             out = np.empty((nx, n_pts))
             out[:, 0] = c0
             # mapaccum отдаёт состояние после КАЖДОГО элемента; точки t_eval —
             # концы каждого n_sub-го
-            out[:, 1:] = x_all[:, self.n_sub - 1::self.n_sub]
+            out[:, 1:] = np.asarray(x_stack)[:, self.n_sub - 1::self.n_sub]
             return out
 
-        self._check_converged(raw[3])
-        x_all, Psi_all, Gamma_all = self._unstack_mapaccum(raw[0], raw[1],
-                                                           raw[2], n_elems)
+        x_stack, Psi_stack, Gamma_stack, stage_res = march(
+            c0, theta_cols, u_cols, h_cols)
+        self._check_converged(stage_res)
+        x_all, Psi_all, Gamma_all = self._unstack_mapaccum(
+            x_stack, Psi_stack, Gamma_stack, n_elems)
         return self._accumulate_sens(c0, x_all, Psi_all, Gamma_all, n_pts)
 
-    def _march_batch_compiled(self, c0_list, theta, t_grids):
-        """Все шуты батча: группировка по длине сетки + потоковый map."""
-        nx, n_theta = self.nx, self.n_theta
+    @staticmethod
+    def _shoot_block(stack, j, n_elems, width):
+        """Блок шута j в выходе map (шуты состыкованы горизонтально).
 
+        Одна формула на три стека: ширина столбца элемента width равна 1 для
+        x, nx для Psi и n_theta для Gamma.
+        """
+        return stack[:, j * n_elems * width:(j + 1) * n_elems * width]
+
+    def _march_group(self, idxs, c0_list, theta, t_grids):
+        """Группа шутов одной длины сетки одним потоковым map-вызовом."""
+        nx, n_theta = self.nx, self.n_theta
+        n_pts = len(t_grids[idxs[0]])
+        n_elems = (n_pts - 1) * self.n_sub
+
+        x0_mat = np.column_stack([c0_list[i] for i in idxs])
+        theta_cols, u_cols, h_cols = zip(
+            *(self._march_inputs(theta, t_grids[i]) for i in idxs))
+        marchmap = self._get_mapmarch(n_elems, len(idxs))
+        x_stack, Psi_stack, Gamma_stack, stage_res = marchmap(
+            x0_mat, np.hstack(theta_cols), np.hstack(u_cols),
+            np.hstack(h_cols))
+        self._check_converged(stage_res)
+
+        x_stack = np.asarray(x_stack)
+        Psi_stack = np.asarray(Psi_stack)
+        Gamma_stack = np.asarray(Gamma_stack)
+        outs = []
+        for j, i in enumerate(idxs):
+            x_all, Psi_all, Gamma_all = self._unstack_mapaccum(
+                self._shoot_block(x_stack, j, n_elems, 1),
+                self._shoot_block(Psi_stack, j, n_elems, nx),
+                self._shoot_block(Gamma_stack, j, n_elems, n_theta),
+                n_elems)
+            outs.append(self._accumulate_sens(c0_list[i], x_all, Psi_all,
+                                              Gamma_all, n_pts))
+        return outs
+
+    def _march_batch_compiled(self, c0_list, theta, t_grids):
+        """Все шуты батча: группировка по длине сетки + потоковый map.
+
+        Входы уже нормализованы публичным методом (float-массивы, theta
+        обрезана до n_theta).
+        """
         results = [None] * len(t_grids)
         for idxs in group_by_grid_length(t_grids):
-            n_pts = len(t_grids[idxs[0]])
-            n_elems = (n_pts - 1) * self.n_sub
             if len(idxs) == 1 or self.n_threads == 1:
                 for i in idxs:
-                    results[i] = self._march_compiled(
-                        np.asarray(c0_list[i], float), theta,
-                        np.asarray(t_grids[i], float), with_sens=True)
-                continue
-
-            x0_mat = np.column_stack([np.asarray(c0_list[i], float) for i in idxs])
-            theta_cols, u_cols, h_cols = zip(
-                *(self._march_inputs(theta, np.asarray(t_grids[i], float))
-                  for i in idxs))
-            marchmap = self._get_mapmarch(n_elems, len(idxs))
-            raw = marchmap(x0_mat, np.hstack(theta_cols), np.hstack(u_cols),
-                           np.hstack(h_cols))
-            self._check_converged(raw[3])
-
-            # map стыкует выходы шутов горизонтально: блок шута j — столбцы
-            # [j*n_elems*(...), (j+1)*n_elems*(...))
-            x_stack = np.asarray(raw[0])       # (nx, G*n_elems)
-            Psi_stack = np.asarray(raw[1])     # (nx, G*n_elems*nx)
-            Gamma_stack = np.asarray(raw[2])   # (nx, G*n_elems*np)
-            for j, i in enumerate(idxs):
-                x_all, Psi_all, Gamma_all = self._unstack_mapaccum(
-                    x_stack[:, j * n_elems:(j + 1) * n_elems],
-                    Psi_stack[:, j * n_elems * nx:(j + 1) * n_elems * nx],
-                    Gamma_stack[:, j * n_elems * n_theta:(j + 1) * n_elems * n_theta],
-                    n_elems)
-                results[i] = self._accumulate_sens(
-                    np.asarray(c0_list[i], float), x_all, Psi_all, Gamma_all,
-                    n_pts)
+                    results[i] = self._march_compiled(c0_list[i], theta,
+                                                      t_grids[i],
+                                                      with_sens=True)
+            else:
+                for i, out in zip(idxs, self._march_group(idxs, c0_list,
+                                                          theta, t_grids)):
+                    results[i] = out
         return results
 
     def _march(self, c0, theta, t_eval, with_sens):
@@ -402,14 +427,12 @@ class CollocationSystemJacobian(SystemJacobian):
         t_eval = np.asarray(t_eval, dtype=float)
         theta = np.asarray(theta, dtype=float)[:self.n_theta]
         if len(t_eval) < 2:                    # нет ни одного элемента
-            nx, n_theta = self.nx, self.n_theta
-            if with_sens:
-                out = np.zeros((nx + nx * n_theta + nx * nx, len(t_eval)))
-                if len(t_eval) == 1:
-                    out[:, 0] = self._pack_row(c0, np.zeros((nx, n_theta)),
-                                               np.eye(nx))
-            else:
-                out = np.tile(c0.reshape(-1, 1), (1, len(t_eval)))
+            if not with_sens:
+                return np.tile(c0.reshape(-1, 1), (1, len(t_eval)))
+            row0 = initial_flat_row(c0, self.n_theta)
+            out = np.zeros((row0.size, len(t_eval)))
+            if len(t_eval) == 1:
+                out[:, 0] = row0
             return out
         return self._march_compiled(c0, theta, t_eval, with_sens)
 
@@ -424,13 +447,14 @@ class CollocationSystemJacobian(SystemJacobian):
         """Только состояние (nx, N)."""
         return self._march(c0, theta, t_eval, with_sens=False)
 
-    # JAX-варианты маршрутизируются на ту же реализацию: для коллокационного
+    # jax-имена маршрутизируются на ту же реализацию: для коллокационного
     # интегратора флаг use_jax не имеет значения
-    def get_jacobian_solution_jax(self, c0, theta, t_eval):
-        return self._march(c0, theta, t_eval, with_sens=True)
-
     def get_jacobian_solution_jax_batch(self, c0_list, theta, t_grids):
+        # Нормализация входов — один раз здесь; внутренние методы марша
+        # работают только с float-массивами и theta длины n_theta
         theta = np.asarray(theta, dtype=float)[:self.n_theta]
+        c0_list = [np.asarray(c0, dtype=float) for c0 in c0_list]
+        t_grids = [np.asarray(t, dtype=float) for t in t_grids]
         return self._march_batch_compiled(c0_list, theta, t_grids)
 
     def get_solution_jax(self, c0, theta, t_eval):

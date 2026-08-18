@@ -4,7 +4,8 @@ from dataclasses import dataclass
 import numpy as np
 from commom_utils.ode_system import ODESystem, SystemJacobian
 from commom_utils.sensitivity import SensitivityTrajectory
-from scipy.sparse import block_diag, csr_matrix, vstack, hstack, eye as speye
+from scipy.sparse import (bmat, block_diag, csr_matrix, vstack, hstack,
+                          eye as speye)
 
 
 @dataclass
@@ -102,15 +103,19 @@ class TimeIntervalManager:
         self.shoot_indexes = np.append(shoot_indexes, self.measurement_indexes[-1])
         self.N_shoot = len(self.shoot_indexes) - 1
 
+        # Интервалы предвычислены: shoot_indexes уже задаёт границы, маски
+        # по measurement_indexes на каждый вызов не нужны. Сетка шута — его
+        # измерения плюс следующая точка (стыковочная).
+        self._intervals = []
+        for j in range(self.N_shoot):
+            meas_idx = np.arange(self.shoot_indexes[j], self.shoot_indexes[j + 1])
+            t_interval = np.append(self.t_eval_measurements[meas_idx],
+                                   self.t_eval_measurements[meas_idx[-1] + 1])
+            self._intervals.append((t_interval, meas_idx))
+
     def get_time_interval(self, shoot):
-        meas_idx = self.measurement_indexes[
-            (self.measurement_indexes >= self.shoot_indexes[shoot]) &
-            (self.measurement_indexes < self.shoot_indexes[shoot + 1])
-        ]
-        t_interval = self.t_eval_measurements[meas_idx]
-        t_interval = np.append(t_interval, self.t_eval_measurements[meas_idx[-1] + 1])
-        return t_interval, meas_idx
-    
+        """(сетка шута с стыковочной точкой, индексы его измерений)."""
+        return self._intervals[shoot]
 
 
 
@@ -139,37 +144,46 @@ class MultipleShooting:
         self.layout.add_batch(tm.N_shoot)
 
 
-    def make_full_theta(self, theta0, c0_guess = None, c0_init_method='inverse_h', n_iter=1):
-        theta_full = np.copy(theta0)
+    def make_full_theta(self, theta0, c0_guess=None, c0_init_method='inverse_h',
+                        n_iter=1):
+        """theta_full = [theta0; c_1..c_T], c_j — из первого измерения шута.
+
+        Способы инициализации c_j по (y, t) первой точки шута:
+        - 'inverse_h' (дефолт): обратить наблюдение Ньютоном (см. inverse_h);
+        - 'measurement_pad': скопировать измерение (годится при h(x) = x);
+        - 'zeros': нули.
+        """
         n_state = self.system.nx
 
+        def c0_zeros(y, t):
+            return np.zeros(n_state)
+
+        def c0_measurement_pad(y, t):
+            c0_ = np.zeros(n_state)
+            c0_[:n_state] = y[:n_state]
+            return c0_
+
+        def c0_inverse_h(y, t):
+            x_guess = (np.zeros(n_state)
+                       if c0_guess is None or np.any(np.isnan(c0_guess))
+                       else c0_guess)
+            return self.system.inverse_h(y, t, theta0,
+                                         x_guess=x_guess, n_iter=n_iter)
+
+        methods = {'zeros': c0_zeros, 'measurement_pad': c0_measurement_pad,
+                   'inverse_h': c0_inverse_h}
+        if c0_init_method not in methods:
+            raise ValueError(f"Unknown c0_init_method: {c0_init_method}")
+        init_c0 = methods[c0_init_method]
+
+        parts = [np.copy(theta0)]
         for state_measured, t_meas, tm in zip(self.state_measured_batches,
                                               self.t_eval_measurements_batches,
                                               self.interval_managers):
             for shoot in range(tm.N_shoot):
                 idx = tm.shoot_indexes[shoot]
-                y_first = state_measured[idx]
-                t_first = t_meas[idx]
-                
-                if c0_init_method == 'zeros':
-                    c0_ = np.zeros(n_state)
-                elif c0_init_method == 'measurement_pad':
-                    c0_ = np.zeros(n_state)
-                    c0_[:n_state] = y_first[:n_state]
-                elif c0_init_method == 'inverse_h':
-                    x0_guess = np.zeros(n_state) if c0_guess is None or np.any(np.isnan(c0_guess)) else c0_guess
-                    
-                    c0_ = self.system.inverse_h(y_first, t_first, theta0, 
-                                                x_guess=x0_guess, n_iter=n_iter)
-                else:
-                    raise ValueError(f"Unknown c0_init_method: {c0_init_method}")
-                
-                theta_full = np.concatenate((theta_full, c0_))
-        return theta_full
-
-    def _concatenate_jacobians(self, J1, J2):
-        """Совместимость с прежним поэтапным интерфейсом склейки."""
-        return self._concatenate_jacobian_batches([J1, J2])
+                parts.append(init_c0(state_measured[idx], t_meas[idx]))
+        return np.concatenate(parts)
 
     def _concatenate_jacobian_batches(self, jacobians):
         """Собирает локальные якобианы батчей за один проход.
@@ -297,12 +311,15 @@ class MultipleShooting:
 
         R_G = np.concatenate([-(rows[j].x_end - rows[j + 1].c0)
                               for j in range(n_shoot - 1)])
-        zeros_col = csr_matrix((n_cont, n_state))
-        lower = hstack([block_diag([r.S_c_end for r in rows[:-1]]), zeros_col])
-        upper = hstack([zeros_col, -speye(n_cont)])
-        J_G = hstack([csr_matrix(np.vstack([r.S_theta_end for r in rows[:-1]])),
-                      lower + upper], format='csr')
-        return J_G, R_G
+        # По блочной строке на стык j|j+1: [S_theta_end_j | ... S_c_end_j, -I ...]
+        eye = speye(n_state)
+        blocks = []
+        for j in range(n_shoot - 1):
+            row = [csr_matrix(rows[j].S_theta_end)] + [None] * n_shoot
+            row[1 + j] = csr_matrix(rows[j].S_c_end)
+            row[2 + j] = -eye
+            blocks.append(row)
+        return bmat(blocks, format='csr'), R_G
 
     def _solve_batch(self, theta_full, state_measured, t_meas, batch_idx):
         _, _, n_obs = self.system.dims()

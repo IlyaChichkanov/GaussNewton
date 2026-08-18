@@ -9,7 +9,8 @@ from abc import abstractmethod
 from typing import NamedTuple
 from jaxadi import convert
 
-from commom_utils.sensitivity import group_by_grid_length
+from commom_utils.sensitivity import (group_by_grid_length, initial_flat_row,
+                                      split_row)
 
 
 class Dims(NamedTuple):
@@ -75,43 +76,47 @@ class SystemJacobian:
         self.n_theta = len(theta_list)
         self.n_obs = len(h_observ.elements())
 
-        # --- Создание CasADi функций ---
-        self._f_ca = Function('func', [*state_list, *inp_list, *theta_list], [f])
+        # --- Компиляция CasADi-функций (у всех один список аргументов) ---
+        args = [*state_list, *inp_list, *theta_list]
+        state_vec, theta_vec = vertcat(*state_list), vertcat(*theta_list)
+
+        def _fn(name, expr):
+            return Function(name, args, [expr])
+
+        # Имена приватных хендлов повторяют публичные методы-обёртки:
+        # _f_ca <-> f, _dh_dx_ca <-> dh_dx и т.д. (одна величина = одно имя)
+        self._f_ca = _fn('f', f)
         self._f_jax_ca = convert(self._f_ca, compile=True)
+        self._h_ca = _fn('h', h_observ)
+        self._dh_dx_ca = _fn('dh_dx', jacobian(h_observ, state_vec))
+        self._dh_dtheta_ca = _fn('dh_dtheta', jacobian(h_observ, theta_vec))
+        self._df_dtheta_ca = _fn('df_dtheta', jacobian(f, theta_vec))
+        self._df_dtheta_jax_ca = convert(self._df_dtheta_ca, compile=True)
+        self._df_dx_ca = _fn('df_dx', jacobian(f, state_vec))
+        self._df_dx_jax_ca = convert(self._df_dx_ca, compile=True)
 
-        self._h_ca = Function('h', [*state_list, *inp_list, *theta_list], [h_observ])
+        self.identity_observation = self._is_identity_observation(h_observ,
+                                                                  state_vec)
 
-        # Якобианы
-        J_h_x = jacobian(h_observ, vertcat(*state_list))
-        self._h_x_ca = Function('J_h_x', [*state_list, *inp_list, *theta_list], [J_h_x])
-
-        J_h_theta = jacobian(h_observ, vertcat(*theta_list))
-        self._h_theta_ca = Function('J_h_theta', [*state_list, *inp_list, *theta_list], [J_h_theta])
-
-        J_p = jacobian(f, vertcat(*theta_list))
-        self._f_theta_ca = Function('J_p', [*state_list, *inp_list, *theta_list], [J_p])
-        self._f_theta_jax_ca = convert(self._f_theta_ca, compile=True)
-
-        J_x = jacobian(f, vertcat(*state_list))
-        self._f_x_ca = Function('J_x', [*state_list, *inp_list, *theta_list], [J_x])
-        self._f_x_jax_ca = convert(self._f_x_ca, compile=True)
-
-        # Слайсы блоков S_theta и S_c внутри плоского расширенного состояния
-        # [x; S_theta.flatten(); S_c.flatten()] — см. commom_utils/sensitivity.py
-        self._IDX_S_THETA = slice(self.nx, self.nx + self.nx * self.n_theta)
-        self._IDX_S_C = slice(self._IDX_S_THETA.stop, self._IDX_S_THETA.stop + self.nx * self.nx)
-
-        # Тождественное наблюдение h(x) = x: dh/dx = I, dh/dθ = 0 —
-        # позволяет полностью пропустить вычисление якобианов наблюдения
-        state_vec = vertcat(*state_list)
-        try:
-            self.identity_observation = (h_observ.shape == state_vec.shape
-                                         and bool(ca.is_equal(h_observ, state_vec, 20)))
-        except Exception:
-            self.identity_observation = False
-
-        # Кэш map-версий функций наблюдения (ключ: (имя, N точек))
+        # Кэши: map-версии функций наблюдения (ключ: (имя, N точек))
+        # и vmap-обёртка интегратора расширенной системы
         self._obs_map_cache = {}
+        self._jax_vmap_full = None
+
+    @staticmethod
+    def _is_identity_observation(h_observ, state_vec):
+        """h(x) = x? Тогда dh/dx = I, dh/dtheta = 0, и якобианы наблюдения
+        можно не вычислять вовсе.
+
+        20 — глубина структурного сравнения выражений в ca.is_equal
+        (не допуск!); is_equal может бросить на несравнимых формах —
+        тогда считаем наблюдение нетождественным.
+        """
+        try:
+            return (h_observ.shape == state_vec.shape
+                    and bool(ca.is_equal(h_observ, state_vec, 20)))
+        except Exception:
+            return False
 
     # ----------------------------------------------------------------------
     # Вспомогательные методы
@@ -137,6 +142,28 @@ class SystemJacobian:
         """Размерности задачи: (nx, n_theta, n_obs)."""
         return Dims(self.nx, self.n_theta, self.n_obs)
 
+    def _inp_on_times(self, t_flat):
+        """Входные сигналы на векторе времени -> (len(t_flat), nu).
+
+        Быстрый путь — один вызов get_input_signals с массивом времени
+        (интерполяторы обычно его принимают); если функция входов массив не
+        переваривает — семантически эквивалентный обход по точкам.
+        Общий помощник обоих батчевых потребителей: observation_batch и
+        подготовки узловых входов в коллокациях.
+        """
+        t_flat = np.asarray(t_flat)
+        n = t_flat.size
+        if self.nu == 0:
+            return np.zeros((n, 0))
+        try:
+            sigs = self.model.get_input_signals(t_flat)
+            return np.array([np.asarray(s, dtype=float).reshape(n)
+                             for s in sigs]).T
+        except Exception:
+            return np.array(
+                [np.asarray(self._get_inp_signals(t), dtype=float)
+                 .reshape(self.nu) for t in t_flat]).reshape(n, self.nu)
+
     # ----------------------------------------------------------------------
     # Методы для обычного режима (NumPy)
     # ----------------------------------------------------------------------
@@ -145,31 +172,6 @@ class SystemJacobian:
         inp = self._get_inp_signals(t)
         return np.array(self._h_ca(*state, *inp, *theta)).flatten()
 
-    # def inverse_h(self, y, t, theta, x_guess=None, n_iter=1):
-    #     """
-    #     Приближённо решает уравнение h(x, theta) = y относительно x.
-    #     Параметры:
-    #         y: измерение (meas_len,)
-    #         t: время
-    #         theta: параметры (theta_len,)
-    #         x_guess: начальное приближение (state_len,). Если None, то нули.
-    #         n_iter: число итераций Гаусса–Ньютона (обычно 1-2).
-    #     Возвращает:
-    #         x: оценка состояния (state_len,)
-    #     """
-    #     if x_guess is None:
-    #         x_guess = np.zeros(self.nx)
-        
-    #     x = x_guess.copy()
-    #     for _ in range(n_iter):
-    #         dh_dx = self.dh_dx(x, t, theta)        # (meas_len, state_len)
-    #         h_val = self.h(x, t, theta)          # (meas_len,)
-    #         residual = y - h_val
-    #         # Решаем линейную систему (least squares)
-    #         delta_x = np.linalg.lstsq(dh_dx, residual, rcond=None)[0]
-    #         x = x + delta_x
-    #     return x
-    
     def inverse_h(self, y, t, theta, x_guess=None, n_iter=1):
         """
         Приближённо решает уравнение h(x, theta) = y относительно x.
@@ -209,22 +211,22 @@ class SystemJacobian:
     def dh_dx(self, state, t, theta):
         """Якобиан выхода по состоянию."""
         inp = self._get_inp_signals(t)
-        return np.array(self._h_x_ca(*state, *inp, *theta))
+        return np.array(self._dh_dx_ca(*state, *inp, *theta))
 
     def dh_dtheta(self, state, t, theta):
         """Якобиан выхода по параметрам."""
         inp = self._get_inp_signals(t)
-        return np.array(self._h_theta_ca(*state, *inp, *theta)).squeeze()
+        return np.array(self._dh_dtheta_ca(*state, *inp, *theta)).squeeze()
 
     def df_dtheta(self, state, t, theta):
         """Якобиан правой части по параметрам."""
         inp = self._get_inp_signals(t)
-        return np.array(self._f_theta_ca(*state, *inp, *theta))
+        return np.array(self._df_dtheta_ca(*state, *inp, *theta))
 
     def df_dx(self, state, t, theta):
         """Якобиан правой части по состоянию."""
         inp = self._get_inp_signals(t)
-        return np.array(self._f_x_ca(*state, *inp, *theta))
+        return np.array(self._df_dx_ca(*state, *inp, *theta))
 
     # ----------------------------------------------------------------------
     # Батчевые вычисления наблюдений (CasADi Function.map)
@@ -234,8 +236,8 @@ class SystemJacobian:
         key = (name, n_points)
         if key not in self._obs_map_cache:
             base = {'h': self._h_ca,
-                    'dh_dx': self._h_x_ca,
-                    'dh_dtheta': self._h_theta_ca}[name]
+                    'dh_dx': self._dh_dx_ca,
+                    'dh_dtheta': self._dh_dtheta_ca}[name]
             self._obs_map_cache[key] = base.map(n_points)
         return self._obs_map_cache[key]
 
@@ -246,25 +248,23 @@ class SystemJacobian:
         Возвращает: h (N, n_obs), dh_dx (N, n_obs, nx), dh_dtheta (N, n_obs, nθ).
         """
         n_points = states.shape[1]
-        try:
-            # Интерполяторы обычно принимают массив времени целиком
-            inp = np.array([np.asarray(s, dtype=float).reshape(n_points)
-                            for s in self.model.get_input_signals(np.asarray(t_array))]).T
-        except Exception:
-            inp = np.array([np.asarray(self._get_inp_signals(t), dtype=float).reshape(self.nu)
-                            for t in t_array]).reshape(n_points, self.nu)
+        inp = self._inp_on_times(t_array)
 
         # Каждый скалярный вход map-функции — строка (1, N); theta транслируется
         args = [states[i, :].reshape(1, n_points) for i in range(self.nx)]
         args += [inp[:, j].reshape(1, n_points) for j in range(self.nu)]
         args += [float(theta[k]) for k in range(self.n_theta)]
 
+        def unstack(mat, width):
+            # map стыкует матричные выходы по столбцам:
+            # (n_obs, width*N) -> (N, n_obs, width)
+            return np.array(mat).reshape(self.n_obs, n_points,
+                                         width).transpose(1, 0, 2)
+
         h = np.array(self._obs_mapped('h', n_points)(*args))  # (n_obs, N)
-        # map конкатенирует выходы по столбцам: (n_obs, nx*N) -> (N, n_obs, nx)
-        dh_dx = np.array(self._obs_mapped('dh_dx', n_points)(*args))
-        dh_dx = dh_dx.reshape(self.n_obs, n_points, self.nx).transpose(1, 0, 2)
-        dh_dtheta = np.array(self._obs_mapped('dh_dtheta', n_points)(*args))
-        dh_dtheta = dh_dtheta.reshape(self.n_obs, n_points, self.n_theta).transpose(1, 0, 2)
+        dh_dx = unstack(self._obs_mapped('dh_dx', n_points)(*args), self.nx)
+        dh_dtheta = unstack(self._obs_mapped('dh_dtheta', n_points)(*args),
+                            self.n_theta)
         return h.T, dh_dx, dh_dtheta
 
     # ----------------------------------------------------------------------
@@ -276,14 +276,18 @@ class SystemJacobian:
         return jnp.array(self._f_jax_ca(*y, *inp, *theta)[0].flatten())
 
     def df_dtheta_jax(self, state, t, theta):
-        """JAX-совместимый якобиан по параметрам."""
+        """JAX-совместимый якобиан по параметрам, (nx, n_theta)."""
         inp = self._get_inp_signals(t)
-        return jnp.array(self._f_theta_jax_ca(*state, *inp, *theta))[0]
+        return jnp.array(self._df_dtheta_jax_ca(*state, *inp, *theta))[0]
 
     def df_dx_jax(self, state, t, theta):
-        """JAX-совместимый якобиан по состоянию."""
+        """JAX-совместимый якобиан по состоянию, (nx, nx).
+
+        jaxadi отдаёт список выходов — без [0] здесь была бы форма
+        (1, nx, nx), и матумножение на неё молча давало лишнюю ось.
+        """
         inp = self._get_inp_signals(t)
-        return jnp.array(self._f_x_jax_ca(*state, *inp, *theta))
+        return jnp.array(self._df_dx_jax_ca(*state, *inp, *theta))[0]
 
     # ----------------------------------------------------------------------
     # Интегрирование
@@ -302,11 +306,8 @@ class SystemJacobian:
 
     def get_jacobian_solution(self, c0, theta, t_eval):
         """Интегрирование расширенной системы (состояние + чувствительности) (обычный режим)."""
-        n = self.nx
         p = self.n_theta
-
-        J0 = np.concatenate([np.zeros((n, p)).flatten(), np.eye(n).flatten()])
-        y0 = np.concatenate([c0, J0])
+        y0 = initial_flat_row(c0, p)
 
         def full_ode(t, y):
             return self._variational_rhs(y, t, theta[:p])
@@ -330,29 +331,18 @@ class SystemJacobian:
                      rtol=self.RTOL, atol=self.ATOL)
         return np.array(sol).T
 
-    def get_jacobian_solution_jax(self, c0, theta, t_eval):
-        """JAX-интегрирование расширенной системы (состояние + чувствительности)."""
-        n = self.nx
-        p = self.n_theta
-
-        J0 = jnp.concatenate([jnp.zeros((n, p)).flatten(), jnp.eye(n).flatten()])
-        y0 = jnp.concatenate([jnp.array(c0), J0])
-
-        sol = odeint(self._variational_rhs_jax, y0, jnp.array(t_eval), *theta[:p],
-                     rtol=self.RTOL, atol=self.ATOL)
-        return np.array(sol).T
-
     def _vmapped_full_integrator(self):
         """JIT+vmap-обёртка интегратора расширенной системы (кэшируется).
 
         jax.jit сам перекомпилирует при смене формы (число шутов, длина сетки).
         """
-        if getattr(self, '_jax_vmap_full', None) is None:
+        if self._jax_vmap_full is None:
             n, p = self.nx, self.n_theta
-            J0 = jnp.concatenate([jnp.zeros(n * p), jnp.eye(n).flatten()])
+            # Хвост начальной строки (S_theta = 0, S_c = I) — константа
+            sens0 = jnp.array(initial_flat_row(np.zeros(n), p)[n:])
 
             def integrate_one(c0, t_grid, theta):
-                y0 = jnp.concatenate([c0, J0])
+                y0 = jnp.concatenate([c0, sens0])
                 return odeint(self._variational_rhs_jax, y0, t_grid, *theta,
                               rtol=self.RTOL, atol=self.ATOL)
 
@@ -400,33 +390,38 @@ class SystemJacobian:
         на каждый шаг интегратора.
         """
         n, p = self.nx, self.n_theta
-        x = y[:n]
-        S_theta = y[self._IDX_S_THETA].reshape((n, p))
-        S_c = y[self._IDX_S_C].reshape((n, n))
+        x, S_theta, S_c = split_row(y, n, p)
 
         args = (*x, *self._get_inp_signals(t), *theta)
         dx = np.array(self._f_ca(*args)).ravel()
-        f_x = np.array(self._f_x_ca(*args))
+        f_x = np.array(self._df_dx_ca(*args))
+        f_theta = np.array(self._df_dtheta_ca(*args))
+
         dS = f_x @ np.concatenate([S_theta, S_c], axis=1)
-        dS[:, :p] += np.array(self._f_theta_ca(*args))
         # layout плоский: сначала весь S_theta, потом весь S_c (C-order каждый),
         # поэтому склейку приходится снова разрезать, а не ravel'ить целиком
-        return np.concatenate([dx, dS[:, :p].ravel(), dS[:, p:].ravel()])
+        return np.concatenate([dx, (dS[:, :p] + f_theta).ravel(),
+                               dS[:, p:].ravel()])
 
     def _variational_rhs_jax(self, y, t, *theta):
-        """Правая часть расширенной системы (jax) — та же схема."""
-        n, p = self.nx, self.n_theta
-        x = y[:n]
-        S_theta = y[self._IDX_S_THETA].reshape((n, p))
-        S_c = y[self._IDX_S_C].reshape((n, n))
+        """Правая часть расширенной системы (jax) — та же схема.
 
-        # df_dx_jax отдаёт (1, n, n) — приводим к (n, n) явно, а не полагаемся
-        # на broadcast (раньше он молча давал (1, n, p) на выходе матумножения)
-        f_x = self.df_dx_jax(x, t, theta).reshape((n, n))
-        dx = self.f_jax(x, t, *theta)
+        Как и numpy-версия, зовёт скомпилированные функции напрямую с общим
+        args: путь через обёртки f_jax/df_dx_jax/df_dtheta_jax вычислял бы
+        входные сигналы трижды за вызов (под jit это цена трассировки, но
+        пара версий обязана читаться как одно и то же дважды).
+        """
+        n, p = self.nx, self.n_theta
+        x, S_theta, S_c = split_row(y, n, p)
+
+        args = (*x, *self._get_inp_signals(t), *theta)
+        dx = jnp.array(self._f_jax_ca(*args)[0].flatten())
+        f_x = jnp.array(self._df_dx_jax_ca(*args))[0]
+        f_theta = jnp.array(self._df_dtheta_jax_ca(*args))[0]
+
         dS = f_x @ jnp.concatenate([S_theta, S_c], axis=1)
-        dS_theta = dS[:, :p] + self.df_dtheta_jax(x, t, theta)
-        return jnp.concatenate([dx, dS_theta.flatten(), dS[:, p:].flatten()])
+        return jnp.concatenate([dx, (dS[:, :p] + f_theta).flatten(),
+                                dS[:, p:].flatten()])
 
 
 class SystemIntegrator(SystemJacobian):
@@ -457,6 +452,8 @@ class SystemIntegrator(SystemJacobian):
         return np.array(self._f_ca(*state, *u, *theta)).ravel()
 
     def f_of_u_jax(self, state, t, u, theta):
+        # t не используется (u удерживается), но обязателен: odeint зовёт
+        # правую часть как f(y, t, *args)
         return jnp.array(self._f_jax_ca(*state, *u, *theta)[0]).flatten()
 
     def _check(self, c0, u, theta):
@@ -492,9 +489,9 @@ class SystemIntegrator(SystemJacobian):
         """Линеаризация (A, B, D) = (df/dx, df/du, df/dtheta) в точке."""
         self._check(state, u, theta)
         args = (*state, *u, *theta)
-        return (np.array(self._f_x_ca(*args)),
+        return (np.array(self._df_dx_ca(*args)),
                 np.array(self._f_u_ca(*args)),
-                np.array(self._f_theta_ca(*args)))
+                np.array(self._df_dtheta_ca(*args)))
 
 
 class SyntheticDataGenerator:
@@ -506,8 +503,8 @@ class SyntheticDataGenerator:
     system : object
         Система с методами:
             - dims() -> (state_len, theta_len, meas_len)
-            - get_solution(c0, theta, t_eval) -> array (state_len, n_t) (обычный режим)
-            - get_solution_jax(c0, theta, t_eval) -> array (n_t, state_len) (JAX-режим)
+            - get_solution / get_solution_jax (c0, theta, t_eval)
+              -> array (state_len, n_t)
             - h(state, t, theta) -> измерение в момент t
     sigma : float, default=0.01
         Стандартное отклонение аддитивного гауссовского шума.
@@ -569,14 +566,10 @@ class SyntheticDataGenerator:
 
         t_eval = np.linspace(t_start, t_end, n_measurements)
 
-        # Интегрирование
-        if self.use_jax:
-            # get_solution_jax возвращает (n_measurements, state_len)
-            solution = self.system.get_solution_jax(c0_true, theta, t_eval)
-        else:
-            # get_solution возвращает (state_len, n_measurements)
-            sol = self.system.get_solution(c0_true, theta, t_eval)
-            solution = sol  # приводим к (n_measurements, state_len)
+        # Обе версии интегратора возвращают (state_len, n_measurements)
+        integrate = (self.system.get_solution_jax if self.use_jax
+                     else self.system.get_solution)
+        solution = integrate(c0_true, theta, t_eval)
 
         # Добавляем шум к состояниям
         noise = self.sigma * np.random.normal(size=(self.state_len, n_measurements))
@@ -668,8 +661,12 @@ class MHESyntheticDataGenerator:
         Returns:
             tuple: (t, u, full_states, measured_states)
         """
-        if sigma is None:
-            sigma = [0] * self.meas_dim
+        # sigma: скаляр (один на все каналы) или вектор (meas_dim,);
+        # прежний дефолт [0]*meas_dim падал бы на sigma**2 (list ** int)
+        sigma = np.atleast_1d(np.asarray(
+            0.0 if sigma is None else sigma, dtype=float))
+        if sigma.size == 1:
+            sigma = np.full(self.meas_dim, sigma[0])
         # Get control inputs at each time point
         u = np.zeros((len(t), self.control_dim))
         for i, ti in enumerate(t):
@@ -744,14 +741,17 @@ class MHESyntheticDataGenerator:
         return t_windows, u_windows, meas_windows, full_windows
     
 
-def check_system_ok(system_ode : ODESystem):
+def check_system_ok(system_ode: ODESystem):
+    """Дешёвая проверка согласованности модели: компиляция + число входов.
 
+    Сама компиляция SystemJacobian уже валидирует размерности символов;
+    отдельно проверяем только то, что она проверить не может — что
+    get_input_signals возвращает ровно nu сигналов.
+    """
     system = SystemJacobian(system_ode)
-    assert system.nu == len(system_ode.get_input_signals(0))
-    if not hasattr(system, 'dims'):
-        raise AttributeError("system должен иметь метод dims()")
-
-    if not hasattr(system, 'h'):
-        raise AttributeError("system должен иметь метод h(state, t, theta)")
-    
+    n_inp = len(system_ode.get_input_signals(0))
+    if system.nu != n_inp:
+        raise ValueError(
+            f"{type(system_ode).__name__}: объявлено nu={system.nu}, но "
+            f"get_input_signals(t) возвращает {n_inp} сигналов")
     return True
