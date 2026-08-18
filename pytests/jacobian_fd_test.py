@@ -3,7 +3,7 @@
 
 Зачем отдельный тест. Остальные сверки в pytests/ — взаимные: накопительный
 путь сравнивается с плотным (accumulated_test), коллокации — с solve_ivp
-(collocation_test), adaptive — с compute_delta_gn (adaptive_test). Все они
+(collocation_test), adaptive — с плотным решением (adaptive_test). Все они
 делят общее ядро MultipleShooting.shoot_rows, поэтому систематическая ошибка
 в нём прошла бы через любую из этих сверок незамеченной.
 
@@ -14,7 +14,7 @@ r(theta_full) = [R; R_G], посчитанного тем же solve(). Пров
     [J; J_G] = -d[R; R_G]/d theta_full
 
 (J — якобиан ПРЕДСКАЗАНИЙ, а невязка R = W(y - h), отсюда минус; ровно на
-этом соглашении построен compute_delta_gn, где rhs = [J^T R; R_G]).
+этом соглашении построен gn_step, где rhs = [J^T R; R_G]).
 """
 from pathlib import Path
 import sys
@@ -27,7 +27,7 @@ sys.path.insert(0, str(repo_root))
 
 from commom_utils.systems import Integrator, LotkaVoltera, MassSpringDamper
 from commom_utils.ode_system import SyntheticDataGenerator
-from gauss_newton.gauss_newton_math import MultipleShooting
+from gauss_newton.problem import MultipleShooting
 from gauss_newton.collocation_shooting import CollocationShooting
 from gauss_newton.normal_equations import normal_equations_of
 

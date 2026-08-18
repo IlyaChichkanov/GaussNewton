@@ -1,4 +1,3 @@
-import types
 from pathlib import Path
 import sys
 
@@ -12,7 +11,8 @@ sys.path.insert(0, str(repo_root))
 from commom_utils.systems import LotkaVoltera, Attractor
 from commom_utils.ode_system import ODESystem, SyntheticDataGenerator, SystemJacobian
 from commom_utils.collocation import RadauTables, CollocationSystemJacobian
-from gauss_newton.gauss_newton_math import MultipleShooting, run_optimization
+from gauss_newton.problem import MultipleShooting
+from gauss_newton.adaptive import run_optimization_adaptive
 from gauss_newton.collocation_shooting import CollocationShooting
 
 SYSTEMS_CONFIG = {
@@ -41,17 +41,6 @@ SYSTEMS_CONFIG = {
         "n_sub": 2,
     },
 }
-
-
-def make_config(mu):
-    cfg = types.SimpleNamespace()
-    cfg.mu = mu
-    cfg.n_iter = 20
-    cfg.lambda_ = 0.001
-    cfg.lambda_reg = 0.0
-    cfg.mu_dec = 0.7
-    cfg.mu_min = 1e-6
-    return cfg
 
 
 def generate_data(config):
@@ -123,7 +112,7 @@ def test_ind_property():
     theta = np.array([1.2, 0.4, 0.3, 0.1])
     c0 = np.array([6.0, 5.0])
     t_eval = np.linspace(0.0, 4.0, 30)
-    nx, nth = system.nx, system.np
+    nx, nth = system.nx, system.n_theta
 
     colloc = CollocationSystemJacobian(system, K=3, n_sub=1)
     sol = colloc.get_jacobian_solution(c0, theta, t_eval)
@@ -177,7 +166,7 @@ def test_stiff_simulation():
 
 
 # ---------------------------------------------------------------------------
-# Сквозная идентификация через существующий run_optimization
+# Сквозная идентификация через run_optimization_adaptive
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("system_name", list(SYSTEMS_CONFIG.keys()))
 def test_identification(system_name):
@@ -191,9 +180,8 @@ def test_identification(system_name):
     problem.add_batch(meas, t_meas)
     theta_full = problem.make_full_theta(config["theta_init"])
 
-    _, _, _, theta_full_opt, _, _ = run_optimization(
-        problem=problem, config=make_config(config["mu"]),
-        theta_full=theta_full, system=system, verbose=False)
+    theta_full_opt, _ = run_optimization_adaptive(problem, theta_full,
+                                                  n_iter=20)
 
     true_params = config["true_params"]
     theta_est = theta_full_opt[:len(true_params)]
@@ -216,10 +204,8 @@ def test_agrees_with_multiple_shooting():
                    gamma=np.ones(system.n_obs), c0_cost=1.0, **kwargs)
         prob.add_batch(meas, t_meas)
         theta_full = prob.make_full_theta(config["theta_init"])
-        out = run_optimization(problem=prob, config=make_config(config["mu"]),
-                               theta_full=theta_full, system=system,
-                               verbose=False)
-        estimates[label] = out[3][:len(config["true_params"])]
+        theta_opt, _ = run_optimization_adaptive(prob, theta_full, n_iter=20)
+        estimates[label] = theta_opt[:len(config["true_params"])]
 
     diff = np.abs(estimates["ms"] - estimates["colloc"])
     assert diff.max() < 1e-3, f"MS vs collocation mismatch: {diff}"

@@ -8,16 +8,33 @@ multiple shooting. Два интегратора чувствительност�
 
 - `commom_utils/ode_system.py`
   - `ODESystem` — абстрактная символьная модель (CasADi): `get_derivative`,
-    `observation`, `get_input_signals`; размерности `nx`, `np`, `nu`, `n_obs`.
+    `observation`, `get_input_signals`; размерности `nx`, `n_theta`, `nu`,
+    `n_obs` (атрибут `np` переименован — он затенял numpy).
     `get_input_signals` вызывается ИЗНУТРИ правой части ОДУ — с трассируемым t
     под jax odeint и с массивом t в коллокациях: только `jnp`, без `math.*`
     и питоновских `if t < ...` (нужен `jnp.where`).
   - `SystemJacobian` — компилирует CasADi-функции f, h и их якобианов; интеграторы
     расширенной системы (состояние + чувствительности) через scipy `solve_ivp` и
-    jax `odeint`. Ключевые методы: `get_jacobian_solution`, `get_solution`,
-    `get_jacobian_solution_jax_batch` (vmap+jit, группировка шутов по длине сетки),
-    `observation_batch`, `inverse_h`.
+    jax `odeint`. Значения: `f` (правая часть) и `h` (наблюдение) — имена
+    именно такие, `f_x_theta`/`h_x` удалены как вводящие в заблуждение.
+    Якобианы: `df_dx`, `df_dtheta`, `dh_dx`, `dh_dtheta`. Размерности —
+    `dims()` → `Dims(nx, n_theta, n_obs)` (NamedTuple). Интеграторы:
+    `get_jacobian_solution`, `get_solution`, `get_jacobian_solution_jax_batch`
+    (vmap+jit, группировка шутов по длине сетки), `observation_batch`,
+    `inverse_h`. Вариационные уравнения записаны ровно дважды —
+    `_variational_rhs` и `_variational_rhs_jax`, одинаковой схемой; входные
+    сигналы в numpy-версии вычисляются один раз за вызов правой части.
+  - `SystemIntegrator(SystemJacobian)` — интегрирование с УДЕРЖИВАЕМЫМ входом u
+    от вызывающей стороны (симуляция MPC), а не из модели. `step`, `step_jax`,
+    `integrate`, `get_lin_system_dynamics` → (A, B, D).
   - `SyntheticDataGenerator` — генерация тестовых данных.
+- `commom_utils/sensitivity.py`
+  - `SensitivityTrajectory` — `x (m,nx)`, `S_theta (m,nx,n_theta)`,
+    `S_c (m,nx,nx)` плюс `unpack`/`pack`/`head`. Плоский layout
+    `[x; S_theta.flatten(); S_c.flatten()]` навязан интеграторами и живёт
+    ТОЛЬКО между ними и `unpack` — наружу идут именованные массивы.
+  - `group_by_grid_length(t_grids)` — группировка шутов по длине сетки,
+    общая для jax-батча и коллокационного марша.
 - `commom_utils/collocation.py`
   - `RadauTables(K)` — узлы Радо IIA (K=1,2,3), матрица дифференцирования
     D̃=[d0|D1], таблица Бутчера `butcher_a = inv(D1)`.
@@ -34,13 +51,17 @@ multiple shooting. Два интегратора чувствительност�
     `newton_maxiter=25`, `rootfinder_plugin`/`rootfinder_options` (переход на
     kinsol/fast_newton со своими опциями).
 - `commom_utils/systems.py` — конкретные системы (LotkaVoltera, Attractor, ...).
-- `gauss_newton/gauss_newton_math.py`
-  - `MultipleShooting` — сборка задачи: `solve(theta_full)` → `(J, R, J_G, R_G)`
-    (измерительные невязки и невязки непрерывности); `make_full_theta`.
-  - `compute_delta_gn` — μ-регуляризованный ККТ-шаг (см. математику ниже).
-  - `run_optimization` — итерации ГН с принятием/откатом шага и μ-расписанием.
-  - `compute_parameter_covariance` — маргинальная ковариация θ
-    (Шур-комплемент θ-блока по полной системе [J; J_G]).
+- `gauss_newton/problem.py` (бывший `gauss_newton_math.py`) — ТОЛЬКО сборка задачи
+  - `MultipleShooting` — `solve(theta_full)` → `(J, R, J_G, R_G)`;
+    `make_full_theta`; ядро `shoot_rows`.
+  - `UnknownsLayout` — раскладка `theta_full = [θ; c_1..c_T]` по батчам и шутам
+    (`layout.theta`, `layout.c(batch, shoot)`), строится один раз в `add_batch`.
+  - `ShootRows` — блоки одного шута. `J_theta`/`J_c` — строки якобиана НЕВЯЗОК;
+    `S_theta_end`/`S_c_end` — ЧУВСТВИТЕЛЬНОСТИ состояния в конце шута (из них
+    собираются строки непрерывности). Раньше и то и другое звалось `J_*`.
+  - `solve()` и `NormalEquations.from_jacobian` оставлены как ЭТАЛОННАЯ сборка:
+    в цикле оптимизации не участвуют, но дают `jacobian_fd_test` доступ к J и R
+    — это единственная сверка с внешним эталоном.
 - **Два слоя поверх этого (не смешивать):**
   - `gauss_newton/normal_equations.py` — КАК получить H и g. `NormalEquations`
     (H, g, J_G, R_G, rss, n_rows) + методы `merit(mu)`, `mu_curvature()`,
@@ -50,8 +71,9 @@ multiple shooting. Два интегратора чувствительност�
     точкам шута (стрелочная структура: θθ-блок общий, θс_j/c_jc_j по шутам),
     большая J не строится и JᵀJ не перемножается. Классы
     `MultipleShootingAccum`, `CollocationShootingAccum`; адаптер
-    `normal_equations_of(problem, theta_full)`. Имена — как в документе:
-    `J_theta`/`J_s`, `H_theta`/`H_theta_s`/`H_s`, `g_theta`/`g_s` (s ≡ c_j).
+    `normal_equations_of(problem, theta_full)`. Индекс документа `s` — это наш
+    `c_j`, второго имени нет: `J_theta`/`J_c`, `H_theta`/`H_theta_c`/`H_c`,
+    `g_theta`/`g_c`. Здесь же `confidence_intervals` — рядом с ковариацией.
   - `gauss_newton/adaptive.py` — ЧТО с ними делать: `gn_step(ne, mu, lam)`
     (одна седловая система + pred) и `run_optimization_adaptive` — единственный
     цикл на оба пути. λ по gain ratio (Нильсен), μ стартует по кривизне
@@ -72,14 +94,23 @@ multiple shooting. Два интегратора чувствительност�
 - Теория (ноутбуки — пользователь читает формулы ТОЛЬКО в ноутбуках, не в чате):
   `theory_gauss_newton.ipynb` (ГН + MS + ковариация),
   `collocation.ipynb` (OCFE, Радо IIA, рекурсии Ψ/Γ, верификация),
-  `adaptive_regularization.ipynb` (смысл μ, Нильсен-λ, Пауэлл-μ, эксперименты).
+  `adaptive_regularization.ipynb` (смысл μ, Нильсен-λ, Пауэлл-μ, эксперименты;
+  прежняя схема с ручным μ воспроизведена там ЛОКАЛЬНО — `run_optimization_manual`
+  поверх библиотечного `gn_step`, — потому что сравнение с ней и есть содержание
+  ноутбука, а второй копии математики в библиотеке быть не должно).
+- `NOTATION.md` — таблица «теория ↔ код». Ноутбуки приведены к записи кода:
+  где было `H` (матрица плана) и `G`, теперь `J` и `J_G`; `H` осталось только
+  за нормальной матрицей `JᵀJ`.
 - `experiments/` — реальные данные и ноутбуки (CSV в .gitignore);
   `experiments/data_utils.py` — `LogReaderV2`, `theta_to_physical`.
-- `pytests/` — `uv run pytest pytests/` (68 тестов с acados; mhe/mpc-тесты
-  пропускаются без него через `pytest.importorskip`): gauss_newton_test,
-  collocation_test, adaptive_test, accumulated_test, collocation_accum_test,
-  **jacobian_fd_test** (единственная сверка с ВНЕШНИМ эталоном — конечными
-  разностями; остальные тесты взаимные и делят ядро `shoot_rows`).
+- `pytests/` — `uv run pytest pytests/` (68 passed, 2 skipped без acados):
+  gauss_newton_test, collocation_test, adaptive_test, accumulated_test,
+  collocation_accum_test, systems_smoke_test. Две сверки с ВНЕШНИМ эталоном:
+  **jacobian_fd_test** (якобиан против конечных разностей) и шаг ГН против
+  плотного `numpy.linalg.solve` в adaptive_test; остальные взаимные и делят
+  ядро `shoot_rows`. **regression_test** — замороженные J/R/J_G/R_G/H/g/delta
+  для четырёх задач: ловит изменения ЧИСЕЛ, которые не приводят к падению
+  (перестановка осей, другой порядок вычислений).
   mhe_test/mpc_test пропускаются без acados (`pytest.importorskip`).
   Фигуры plotly по умолчанию не открываются — `GN_TEST_PLOT=1` включает.
 - `tools/setup_repo.sh` — регистрирует git-фильтр `nbstrip` (`.gitattributes`
@@ -92,11 +123,11 @@ multiple shooting. Два интегратора чувствительност�
 
 - Измерительные невязки: r_i = W(y_i − h(x(t_i))), J — их якобиан по [θ; c].
 - Непрерывность: G_j = x_j(t_{j+1}; c_j, θ) − c_{j+1} → (J_G, R_G).
-- Шаг (`compute_delta_gn`): решается седловая система
+- Шаг (`gauss_newton/adaptive.py::gn_step`, единственная реализация): решается
+  седловая система
   `[[H + λ_reg·I + λ·diag(H), J_Gᵀ], [J_G, −μI]] · δ = [Jᵀ R; R_G]`, H = JᵀJ.
-  μ — релаксация ограничений непрерывности: после успешного шага μ ← μ·mu_dec
-  (не ниже mu_min), после неудачного μ ← μ/mu_dec; шаг принимается при
-  trial_cost ≤ best_cost·1.1, cost = ‖R‖² + ‖R_G‖².
+  μ — релаксация ограничений непрерывности; расписание μ и λ — автоматическое,
+  см. `run_optimization_adaptive` выше.
 - Чувствительности (классический путь): вариационные уравнения
   J̇_θ = f_x J_θ + f_θ, J̇_c = f_x J_c — интегрируются вместе с состоянием.
   Оба интегратора (scipy RK45, jax dopri) ЯВНЫЕ → на жёстких системах неприменимы.
@@ -113,16 +144,37 @@ multiple shooting. Два интегратора чувствительност�
 ## Контракты (не ломать)
 
 - `get_jacobian_solution(c0, θ, t_eval)` → матрица, строки
-  `[x; J_θ.flatten(); J_c.flatten()]` (C-order), столбцы = точки t_eval.
-- `solve(theta_full)` → `(J, R, J_G, R_G)`; `run_optimization`/`compute_delta_gn`/
-  `compute_parameter_covariance` знают только этот интерфейс, интегратор им безразличен.
+  `[x; S_θ.flatten(); S_c.flatten()]` (C-order), столбцы = точки t_eval.
+  Разбирать её руками не надо: `SensitivityTrajectory.unpack(flat, nx, n_theta)`.
+- `solve(theta_full)` → `(J, R, J_G, R_G)`; `normal_equations(theta_full)` →
+  `NormalEquations`. Слой оптимизации знает только их, интегратор ему безразличен.
+- Имена — по `NOTATION.md`. Одна величина = одно имя; если для величины
+  появляется второе имя, что-то пошло не так.
 - Существующий код не менять без явной просьбы — новые возможности через
   новые классы/файлы (так сделан CollocationShooting).
+- `pytests/regression_test.py` — численный эталон шага ГН. Рефакторинг обязан
+  проходить его без изменений; пересоздавать (`GN_REGEN_REFERENCE=1`) только
+  когда изменение чисел осознанное и объяснимое. Допуск РАЗНЫЙ по случаям:
+  коллокации идут фиксированной сеткой и сверяются на 1e-10, а адаптивные
+  solve_ivp/odeint — только на 1e-6 (см. грабли ниже).
 
 ## Грабли (проверено на практике)
 
 - `jax.experimental.odeint`: допуски по умолчанию 1.4e-8 — главный тормоз;
-  всегда передавать `rtol=self.RTOL, atol=self.ATOL`.
+  всегда передавать `rtol=self.RTOL, atol=self.ATOL`. Исключение —
+  `SystemIntegrator.step_jax` (симуляция MPC): там допуски по умолчанию
+  сохранены намеренно.
+- Выход АДАПТИВНОГО интегратора невоспроизводим между машинами точнее ~1e-8:
+  размер шага выбирается сравнением оценки ошибки с допуском, и другая
+  арифметика (другой CPU или сборка BLAS) даёт другую последовательность
+  шагов. Зафиксировано на раннере GitHub Actions: `integrator_obs` разошёлся
+  с локальным эталоном на 1.0e-8 при допуске 1e-10. Замораживать результат
+  solve_ivp/odeint жёстче 1e-6 нельзя; у коллокаций сетка фиксирована и
+  проблемы нет.
+- Правая часть ОДУ зовётся десятки тысяч раз за solve, поэтому всё, что можно
+  вычислить один раз за вызов, надо вычислять один раз. Входные сигналы
+  считались трижды (через `f`, `df_dx`, `df_dtheta`) — устранение этого дало
+  1.7× на numpy-пути (3982 → 2294 мс на Integrator, 16 точек, 2 шута).
 - Python dict: `True == 1` → коллизия ключей кэша `(N, True)` и `(N, 1)`;
   либо строковые префиксы в ключах, либо раздельные словари
   (`_accum_cache`/`_map_cache` в коллокациях).

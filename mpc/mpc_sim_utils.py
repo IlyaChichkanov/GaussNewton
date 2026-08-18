@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 import numpy as np
 from scipy import interpolate
-from commom_utils.ode_system import ODESystem, SystemItegrator
+from commom_utils.ode_system import ODESystem, SystemIntegrator
 from mpc.mpc_control_utils import Controller
 import matplotlib.pyplot as plt
 
@@ -152,7 +152,7 @@ class Simulator:
     def __init__(self, model: ODESystem, controller: Controller,
                  trajectory: TrajectoryTimeProfile, model_params: np.array, 
                  delay_cycles=0, use_jax=True):
-        self.integrator = SystemItegrator(model)
+        self.integrator = SystemIntegrator(model)
         self.controller = controller
         self.trajectory = trajectory
         self.delay_cycles = delay_cycles

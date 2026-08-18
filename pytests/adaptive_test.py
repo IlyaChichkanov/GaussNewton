@@ -1,4 +1,3 @@
-import types
 from pathlib import Path
 import sys
 
@@ -10,8 +9,7 @@ sys.path.insert(0, str(repo_root))
 
 from commom_utils.systems import LotkaVoltera, Attractor
 from commom_utils.ode_system import SyntheticDataGenerator
-from gauss_newton.gauss_newton_math import (MultipleShooting, run_optimization,
-                                            compute_delta_gn)
+from gauss_newton.problem import MultipleShooting
 from gauss_newton.adaptive import gn_step, run_optimization_adaptive
 from gauss_newton.normal_equations import NormalEquations
 from gauss_newton.collocation_shooting import CollocationShooting
@@ -71,9 +69,17 @@ def rel_err(theta, true):
 
 
 # ---------------------------------------------------------------------------
-# Шаг: совпадение с compute_delta_gn при одинаковых (mu, lambda) и pred > 0
+# Шаг: совпадение с плотным решением той же седловой системы
 # ---------------------------------------------------------------------------
-def test_step_matches_compute_delta_gn():
+def test_step_matches_dense_saddle_solve():
+    """gn_step решает ровно ту систему, которая написана в его docstring.
+
+    Эталон здесь ВНЕШНИЙ: седловая матрица собирается плотно и решается
+    numpy.linalg.solve, а не второй копией нашего же разреженного кода.
+    Проверяется и матрица, и правая часть:
+
+        [[H + lambda_reg I + lam diag(H), J_G^T], [J_G, -mu I]] [d; nu] = [g; R_G]
+    """
     config = SYSTEMS_CONFIG["LotkaVolterra"]
     _, t_meas, meas = generate_data(config)
     prob = make_problem(config, t_meas, meas)
@@ -81,11 +87,16 @@ def test_step_matches_compute_delta_gn():
     J, R, J_G, R_G = prob.solve(theta_full)
 
     mu, lam, lam_reg = 1.0, 1e-3, 1e-6
-    delta, pred = gn_step(NormalEquations.from_jacobian(J, R, J_G, R_G),
-                          mu, lam, lam_reg)
-    delta_ref, _ = compute_delta_gn(J, R, J_G, R_G, mu, lam, lam_reg,
-                                    theta_full, mu_dec=0.7)
-    # одна и та же седловая система - решения совпадают до допуска решателя
+    ne = NormalEquations.from_jacobian(J, R, J_G, R_G)
+    delta, pred = gn_step(ne, mu, lam, lam_reg)
+
+    H = ne.H.toarray()
+    n, m = H.shape[0], J_G.shape[0]
+    D = lam_reg * np.eye(n) + lam * np.diag(np.maximum(np.diag(H), 1e-10))
+    K = np.block([[H + D, J_G.toarray().T],
+                  [J_G.toarray(), -mu * np.eye(m)]])
+    delta_ref = np.linalg.solve(K, np.concatenate([ne.g, R_G]))[:n]
+
     scale = np.abs(delta_ref).max()
     assert np.abs(delta - delta_ref).max() < 1e-9 * scale
     assert pred > 0
@@ -131,25 +142,31 @@ def test_identification_adaptive(system_name):
 
 
 # ---------------------------------------------------------------------------
-# Согласие с run_optimization (обе схемы - один и тот же минимум)
+# Цикл действительно МИНИМИЗИРУЕТ: эталон - стоимость в истинной точке
 # ---------------------------------------------------------------------------
-def test_agrees_with_baseline():
+def test_beats_cost_at_true_parameters():
+    """Найденная точка не хуже истинных параметров по той же стоимости.
+
+    Раньше здесь сравнивались два наших цикла между собой — сверка была
+    взаимной и уехала бы вместе с общей ошибкой. Эталон тут внешний:
+    параметры, которыми данные были сгенерированы. Оптимум зашумлённой
+    задачи не обязан совпадать с истиной, но стоимость в нём обязана быть
+    не выше — иначе цикл не дошёл до минимума.
+    """
     config = SYSTEMS_CONFIG["LotkaVolterra"]
     _, t_meas, meas = generate_data(config)
 
-    prob_b = make_problem(config, t_meas, meas)
-    th0 = prob_b.make_full_theta(config["theta_init"])
-    cfg = types.SimpleNamespace(mu=1.0, n_iter=40, lambda_=1e-3,
-                                lambda_reg=0.0, mu_dec=0.7, mu_min=1e-6)
-    out = run_optimization(prob_b, cfg, th0, config["class"](), verbose=False)
-    theta_baseline = out[3][:4]
+    prob = make_problem(config, t_meas, meas)
+    theta_opt, _ = run_optimization_adaptive(
+        prob, prob.make_full_theta(config["theta_init"]), n_iter=40)
 
-    prob_a = make_problem(config, t_meas, meas)
-    theta_adaptive, _ = run_optimization_adaptive(
-        prob_a, prob_a.make_full_theta(config["theta_init"]), n_iter=40)
+    cost_opt = NormalEquations.from_jacobian(*prob.solve(theta_opt)).cost()
+    theta_true = prob.make_full_theta(config["true_params"])
+    cost_true = NormalEquations.from_jacobian(*prob.solve(theta_true)).cost()
 
-    diff = np.abs(theta_baseline - theta_adaptive[:4])
-    assert diff.max() < 1e-3, f"baseline vs adaptive mismatch: {diff}"
+    assert cost_opt <= cost_true * (1 + 1e-6), \
+        f"цикл не дошёл до минимума: cost {cost_opt:.6e} > истинная {cost_true:.6e}"
+    assert rel_err(theta_opt, config["true_params"]) < 0.2
 
 
 # ---------------------------------------------------------------------------

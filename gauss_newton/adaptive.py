@@ -6,7 +6,8 @@ gauss_newton/normal_equations.py — как они получены (через 
 накоплением по документу «MS and Orthogonal Collocations»), циклу безразлично.
 Теория и эксперименты: adaptive_regularization.ipynb.
 
-Отличия от run_optimization в gauss_newton_math.py:
+Единственный цикл оптимизации в проекте. Чем он отличается от прежней
+схемы с ручным расписанием mu (удалена вместе с compute_delta_gn):
 - lambda (демпфер Марквардта) адаптируется по gain ratio (схема Нильсена);
 - mu (обратный вес невязок стыковки: шаг — это ГН для
   Phi_mu = ||R||^2 + (1/mu)||R_G||^2) стартует по кривизне
@@ -21,14 +22,14 @@ import numpy as np
 from scipy.sparse import diags, hstack, vstack, eye as speye
 from scipy.sparse.linalg import spsolve
 
-from gauss_newton.gauss_newton_math import confidence_intervals
-from gauss_newton.normal_equations import normal_equations_of
+from gauss_newton.normal_equations import (confidence_intervals,
+                                          normal_equations_of)
 
 
 def gn_step(ne, mu, lam, lambda_reg=0.0):
     """Шаг из mu-регуляризованной седловой системы + pred для gain ratio.
 
-    Решается (как в compute_delta_gn, но с возвратом pred):
+    Решается седловая система (mu-регуляризованная ККТ), плюс pred:
         [[H + D, J_G^T], [J_G, -mu I]] [delta; nu] = [g; R_G],
     D = lambda_reg*I + lam*diag(H). Седловая форма вместо исключённой
     (H + (1/mu) J_G^T J_G): при mu -> 0 исключённая теряет обусловленность
@@ -81,7 +82,7 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
     ci_low, ci_high; плюс accepted (номера принятых) и n_solves.
     """
     theta_full = theta_full.copy()
-    n_theta = problem.system.get_dimentions()[1]
+    n_theta = problem.system.dims()[1]
     try:
         ne = normal_equations_of(problem, theta_full)
     except RuntimeError as exc:

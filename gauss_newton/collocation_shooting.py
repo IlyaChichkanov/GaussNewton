@@ -4,11 +4,11 @@
 CollocationShooting отличается от MultipleShooting только интегратором:
 вместо адаптивного solve_ivp/odeint расширенной системы — марш по элементам
 с Ньютоном и рекурсиями чувствительностей (см. collocation.ipynb). Вся
-сборка J/R/J_G/R_G, mu-машинерия и run_optimization наследуются как есть.
+сборка J/R/J_G/R_G и вся mu-машинерия наследуются как есть.
 Пригоден для жёстких систем (L-устойчивость Радо IIA).
 """
 from commom_utils.collocation import CollocationSystemJacobian
-from gauss_newton.gauss_newton_math import MultipleShooting
+from gauss_newton.problem import MultipleShooting
 
 
 class CollocationShooting(MultipleShooting):

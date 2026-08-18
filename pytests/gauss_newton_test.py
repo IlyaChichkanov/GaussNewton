@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-import types
+import os
 from pathlib import Path
 import sys
 
@@ -8,9 +8,13 @@ repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root))
 
 from commom_utils.systems import LotkaVoltera, Attractor
-from commom_utils.ode_system import SyntheticDataGenerator, SystemJacobian
-from gauss_newton.gauss_newton_math import MultipleShooting, run_optimization
+from commom_utils.ode_system import SyntheticDataGenerator
+from gauss_newton.problem import MultipleShooting
+from gauss_newton.adaptive import run_optimization_adaptive
 from gauss_newton.utils import plot_solution
+
+# Фигуры plotly по умолчанию не открываем: fig.show() вешает headless-прогон
+PLOT = os.environ.get("GN_TEST_PLOT", "0") not in ("0", "", "false", "False")
 # Словарь доступных систем с их конфигурациями
 SYSTEMS_CONFIG = {
     "LotkaVolterra": {
@@ -103,20 +107,8 @@ def test_identification(system, true_params, synthetic_data, system_config):
     theta_full = ms.make_full_theta(theta_init)
 
 
-    config = types.SimpleNamespace()
-    config.mu = system_config["mu"]
-    config.n_iter = 20
-    config.lambda_ = 0.001
-    config.lambda_reg = 0.0
-    config.mu_dec = 0.7
-    config.mu_min = 1e-6
-
-    theta_hist, r_meas_hist, r_cont_hist, theta_full_opt, ci_low_hist, ci_high_hist = run_optimization(
-        problem=ms,
-        config=config,
-        theta_full=theta_full,
-        system=system
-    )
+    # mu и lambda подбираются автоматически: system_config["mu"] больше не нужен
+    theta_full_opt, hist = run_optimization_adaptive(ms, theta_full, n_iter=20)
 
     # Оценённые параметры
     n_theta = len(true_params)
@@ -133,19 +125,18 @@ def test_identification(system, true_params, synthetic_data, system_config):
     assert np.all(rel_error < 0.05), \
         f"Estimation error too high: {rel_error}"
 
-    plot = 1
-    if plot:
+    if PLOT:
         fig = plot_solution(
-            problem = ms, 
-            theta_hist = theta_hist,
+            problem = ms,
+            theta_hist = hist["theta"],
             plot_xy=1,
             plot_theta=True,
             plot_trajectory=0,
             plot_true_solution=False,
             plot_residuals=True,
             plot_measurements = 1,
-            r_meas_hist=r_meas_hist,
-            r_cont_hist=r_cont_hist,
+            r_meas_hist=hist["r_meas"],
+            r_cont_hist=hist["r_cont"],
             index=-1,
             theta_true=None,
         )

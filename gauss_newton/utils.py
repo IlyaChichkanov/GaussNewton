@@ -34,7 +34,7 @@ def plot_solution(
         raise ValueError("problem and theta_hist must be provided")
 
     n_batches = len(problem.t_eval_measurements_batches)
-    n_state, n_theta, n_obs = problem.system.get_dimentions()
+    n_state, n_theta, n_obs = problem.system.dims()
 
     # Имена переменных (если не заданы – используем индексы)
     if state_names is None:
@@ -255,7 +255,7 @@ def plot_solution(
             # Вычисляем наблюдения вдоль траектории
             meas_traj = []
             for t_, state in zip(t_dense, traj):
-                meas_traj.append(problem.system.h_x(state, t_, theta))
+                meas_traj.append(problem.system.h(state, t_, theta))
             meas_traj = np.array(meas_traj)   # (500, n_obs)
 
             # Рисуем траекторию на верхней панели
