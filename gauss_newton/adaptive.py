@@ -24,7 +24,8 @@ from scipy.sparse import diags, hstack, vstack, eye as speye
 from scipy.sparse.linalg import spsolve
 
 from gauss_newton.normal_equations import (confidence_intervals,
-                                          normal_equations_of)
+                                           correlation_matrix,
+                                           normal_equations_of)
 
 
 def gn_step(ne, mu, lam, lambda_reg=0.0, lam_dual=None):
@@ -131,7 +132,7 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
     prev_cont, prev_rss = ne.cont_sq(), ne.rss
 
     hist = dict(theta=[], cost=[], mu=[], lam=[], r_meas=[], r_cont=[],
-                ci_low=[], ci_high=[], accepted=[], n_solves=1)
+                ci_low=[], ci_high=[], corr_cond=[], accepted=[], n_solves=1)
 
     def record():
         hist['theta'].append(theta_full.copy())
@@ -145,6 +146,9 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
             ci_low, ci_high = confidence_intervals(theta_full[:n_theta], cov, dof)
             hist['ci_low'].append(ci_low)
             hist['ci_high'].append(ci_high)
+            # диагностика идентифицируемости из уже посчитанной ковариации:
+            # рост corr_cond = параметры уходят в плоскую долину
+            hist['corr_cond'].append(correlation_matrix(cov)[1])
 
     record()
     rejects = stalls = 0
