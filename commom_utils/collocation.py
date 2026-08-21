@@ -1,28 +1,9 @@
-# -*- coding: utf-8 -*-
-"""Коллокационный интегратор (Радо IIA + IND) на CasADi.
+"""Collocation integrator: Radau IIA stages solved by a CasADi rootfinder,
+sensitivities by internal numerical differentiation.
 
-Теория: collocation.ipynb, раздел «Альтернатива: коллокации как неявный
-интегратор». Коллокационные уравнения элемента записываются как одношаговая
-неявная схема z = A x_prev + h B F(z, theta) (стадийные уравнения Радо IIA)
-и решаются CasADi-rootfinder'ом (Ньютон с line search и точным якобианом).
-Чувствительности решения по theta и по начальному состоянию — производные
-выхода rootfinder'а по теореме о неявной функции (internal numerical
-differentiation, точные производные дискретной схемы); по элементам они
-накапливаются рекурсиями S_c <- Psi S_c, S_th <- Psi S_th + Gamma.
-
-CollocationIntegrator — drop-in замена VariationalIntegrator: та же
-скомпилированная модель (CompiledModel) по композиции, тот же контракт
-выхода (layout строк [x; J_theta.flatten(); J_c.flatten()]), поэтому
-MultipleShooting, run_optimization_adaptive и plot_solution работают без
-изменений. Построение и кэширование CasADi-функций шага вынесено в
-CollocationStepFunctions; сам интегратор — драйвер марша и политика
-проверки сходимости.
-
-Несходимость Ньютона НЕ бросает исключений внутри CasADi (error_on_fail
-отключён — иначе C++ печатает многострочные дампы входов): каждый элемент
-дополнительно возвращает масштабированную невязку в найденной точке, и марш
-проверяет её сам, поднимая обычный RuntimeError одной строкой. В пробной
-точке оптимизации это штатный отказ шага — цикл его перехватывает и откатывает.
+A drop-in replacement for VariationalIntegrator, suitable for stiff systems.
+See docs/math.md for the scheme and docs/pitfalls.md for the rootfinder
+settings.
 """
 import os
 
@@ -35,11 +16,11 @@ from commom_utils.sensitivity import (SensitivityTrajectory,
 
 
 class RadauTables:
-    """Таблицы коллокаций Радо IIA: узлы, матрица дифференцирования, Бутчер.
+    """Radau IIA tables: nodes, differentiation matrix, Butcher table.
 
-    Полином степени K строится по точкам {0, tau_1..tau_K}; tilde_D — матрица
-    производных базиса в узлах коллокации, разбитая на столбец левого края d0
-    и невырожденный блок D1. Таблица Бутчера a = D1^{-1}.
+    The polynomial of degree K is built on {0, tau_1..tau_K}; tilde_D holds the
+    basis derivatives at the collocation nodes, split into the left-edge column
+    d0 and the invertible block D1. Butcher table a = D1^-1.
     """
 
     _NODES = {
@@ -50,24 +31,23 @@ class RadauTables:
 
     def __init__(self, K=3):
         if K not in self._NODES:
-            raise ValueError(f"K={K} не поддерживается (доступно {sorted(self._NODES)})")
+            raise ValueError(f"K={K} is not supported (available: {sorted(self._NODES)})")
         self.K = K
         self.tau = np.array(self._NODES[K])
-        self.nodes = np.concatenate([[0.0], self.tau])   # интерполяционные точки
+        self.nodes = np.concatenate([[0.0], self.tau])
 
         tilde_D = self._differentiation_matrix(self.nodes, self.tau)  # K x (K+1)
         self.d0 = tilde_D[:, 0]
         self.D1 = tilde_D[:, 1:]
         self.butcher_a = np.linalg.inv(self.D1)
 
-        # Самопроверки (см. collocation.ipynb): точность на константах
-        # даёт нулевые суммы строк и A = 1 (x) I
+        # Exactness on constants: zero row sums and A = 1 (x) I
         assert np.allclose(tilde_D.sum(axis=1), 0.0, atol=1e-12)
         assert np.allclose(-self.butcher_a @ self.d0, np.ones(K), atol=1e-12)
 
     @staticmethod
     def _differentiation_matrix(nodes, at):
-        """D[k, j] = dl_j/dtau в точках at[k]."""
+        """D[k, j] = dl_j/dtau at the points at[k]."""
         n = len(nodes)
         D = np.zeros((len(at), n))
         for k, x in enumerate(at):
@@ -86,12 +66,11 @@ class RadauTables:
 
 
 class CollocationStepFunctions:
-    """Символьный шаг элемента и его марш-обёртки (лениво, с кэшами).
+    """Builds and caches the CasADi functions of one element step.
 
-    Отвечает ТОЛЬКО за построение CasADi-функций: стадийный резидуал,
-    rootfinder, пара (step_sens, step_x), их mapaccum по элементам и
-    map('thread') по шутам. Политика проверки сходимости и сам марш —
-    в CollocationIntegrator.
+    Responsible for the symbolic side only: stage residual, rootfinder, the
+    (step_sens, step_x) pair and their mapaccum/map wrappers. The march itself
+    and the convergence policy live in CollocationIntegrator.
     """
 
     def __init__(self, model: CompiledModel, tables: RadauTables,
@@ -105,20 +84,20 @@ class CollocationStepFunctions:
         self.rootfinder_options = dict(rootfinder_options or {})
         self.n_threads = n_threads
 
-        # B (x) I — действие таблицы Бутчера на стековый вектор стадий
+        # B (x) I — the Butcher table acting on the stacked stage vector
         self._B_kron = np.kron(tables.butcher_a, np.eye(model.nx))
-        # Кэши: шаговые функции (лениво), mapaccum по числу элементов,
-        # map('thread') по размеру группы шутов
         self._step_fns = None
+        # Separate caches on purpose: True == 1 in Python, so (n, True) and
+        # (n, 1) would collide in a single dict
         self._accum_cache = {}
         self._map_cache = {}
 
     def _stage_residual_fn(self):
-        """Символы шага и резидуал стадийных уравнений.
+        """Step symbols and the stage residual.
 
         Phi(z; x_prev, theta, u, h) = z - A x_prev - h (B (x) I) F(z),
-        A = 1_K (x) I. Возвращает (syms, phi_fn), где syms — кортеж
-        (z, x_prev, theta, u_flat, h, step_param).
+        A = 1_K (x) I. Returns (syms, phi_fn) with
+        syms = (z, x_prev, theta, u_flat, h, step_param).
         """
         K = self.tables.K
         nx, n_theta, nu = self.model.nx, self.model.n_theta, self.model.nu
@@ -129,11 +108,9 @@ class CollocationStepFunctions:
         u_flat = ca.MX.sym('u_flat', K * nu)
         h = ca.MX.sym('h')
 
-        # F(z): правая часть во всех стадиях (SX-функция _f_ca на
-        # MX-аргументах); vertsplit режет стековые векторы на K блоков
-        # стадий, дальше блок индексируется по своим осям — без сквозной
-        # арифметики k*nx + i; theta одна на все стадии и раскладывается
-        # один раз
+        # F(z): the right-hand side at every stage. vertsplit cuts the stacked
+        # vectors into K stage blocks, so each block is indexed on its own axes
+        # instead of through k*nx + i arithmetic
         z_stages = ca.vertsplit(z, nx)
         u_stages = ca.vertsplit(u_flat, nu) if nu else [u_flat] * K
         th = [theta[i] for i in range(n_theta)]
@@ -148,27 +125,28 @@ class CollocationStepFunctions:
         return (z, x_prev, theta, u_flat, h, step_param), phi_fn
 
     def _make_rootfinder(self, phi_fn):
-        """Ньютон по стадиям: опции сходимости и построение rootfinder."""
+        """Stage Newton: convergence options and the rootfinder itself."""
         rf_opts = {
-            'abstol': self.newton_tol,       # невязка: max|Phi| < tol
-            'abstolStep': self.newton_tol,   # шаг: max|dz| < tol (критерии - ИЛИ);
-                                             # спасает большие масштабы состояний,
-                                             # где abstol упирается в floor округления
+            'abstol': self.newton_tol,       # residual: max|Phi| < tol
+            'abstolStep': self.newton_tol,   # step: max|dz| < tol; the criteria
+                                             # act as OR, which saves large state
+                                             # scales where abstol hits the
+                                             # round-off floor
             'max_iter': self.newton_maxiter,
             'line_search': True,
-            'error_on_fail': False,          # тихо: сходимость проверяет марш
-                                             # по stage_res, без C++ дампов
+            'error_on_fail': False,          # quiet: the march checks stage_res
+                                             # itself, without C++ dumps
         }
         rf_opts.update(self.rootfinder_options)
         return ca.rootfinder('colloc_rf', self.rootfinder_plugin,
                              phi_fn, rf_opts)
 
     def step_pair(self):
-        """Шаг элемента как пара CasADi-функций (лениво, с кэшем).
+        """One element step as a pair of CasADi functions (built once).
 
         step_sens: (x_prev, theta, u, h) -> (x_next, Psi, Gamma, stage_res);
-        step_x — то же без чувствительностей. Psi и Gamma — производные
-        выхода rootfinder по теореме о неявной функции (IND).
+        step_x is the same without sensitivities. Psi and Gamma are derivatives
+        of the rootfinder output, i.e. exact derivatives of the discrete scheme.
         """
         if self._step_fns is not None:
             return self._step_fns
@@ -178,15 +156,15 @@ class CollocationStepFunctions:
         stage_solver = self._make_rootfinder(phi_fn)
 
         K, nx = self.tables.K, self.model.nx
-        z0 = ca.repmat(x_prev, K, 1)          # производная решения по z0 нулевая
+        z0 = ca.repmat(x_prev, K, 1)          # the solution does not depend on z0
         z_sol = stage_solver(z0, step_param)
-        # Радо IIA stiffly accurate (tau_K = 1): последний узел совпадает
-        # с правым краем элемента, поэтому x_next — последний стадийный блок
+        # Radau IIA is stiffly accurate (tau_K = 1): the last node is the right
+        # edge of the element, so x_next is the last stage block
         x_next = z_sol[-nx:]
-        Psi = ca.jacobian(x_next, x_prev)     # через rootfinder — неявная функция
+        Psi = ca.jacobian(x_next, x_prev)     # implicit function theorem
         Gamma = ca.jacobian(x_next, theta)
-        # Масштабированная невязка в найденной точке — маркер сходимости;
-        # при расходимости (inf/nan в z) она тоже inf/nan
+        # Scaled residual at the solution — the convergence marker; on a
+        # divergence (inf/nan in z) it is inf/nan as well
         stage_res = ca.norm_inf(phi_fn(z_sol, step_param)) \
             / (1.0 + ca.norm_inf(z_sol))
 
@@ -198,7 +176,7 @@ class CollocationStepFunctions:
         return self._step_fns
 
     def mapaccum(self, n_elems, with_sens):
-        """Марш по n_elems элементам одного шута (аккумулируется только x)."""
+        """March over the n_elems elements of one shot; only x accumulates."""
         key = (n_elems, with_sens)
         fn = self._accum_cache.get(key)
         if fn is None:
@@ -209,7 +187,7 @@ class CollocationStepFunctions:
         return fn
 
     def mapmarch(self, n_elems, group_size):
-        """map('thread') поверх mapaccum: параллельный марш группы шутов."""
+        """map('thread') over mapaccum: a group of shots marched in parallel."""
         key = (n_elems, group_size)
         fn = self._map_cache.get(key)
         if fn is None:
@@ -221,26 +199,15 @@ class CollocationStepFunctions:
 
 
 class CollocationIntegrator:
-    """Интегратор чувствительностей на коллокациях Радо IIA (IND).
+    """Radau IIA sensitivity integrator for stiff systems.
 
-    Drop-in замена VariationalIntegrator для ЖЁСТКИХ систем: та же
-    скомпилированная модель по композиции, тот же контракт выхода.
-
-    Параметры:
-        model: CompiledModel (или сырая ODESystem — будет скомпилирована).
-        K: число стадий Радо IIA (порядок 2K-1).
-        n_sub: число элементов на интервал между соседними точками t_eval.
-        newton_tol: допуск Ньютона по стадиям — и на невязку max|Phi| (abstol),
-            и на шаг max|dz| (abstolStep); критерии работают как ИЛИ.
-        newton_maxiter: жёсткий предел итераций Ньютона.
-        rootfinder_plugin: плагин ca.rootfinder ('newton'; установлены также
-            'kinsol', 'fast_newton').
-        rootfinder_options: dict, переопределяющий любые опции rootfinder
-            (у kinsol свои имена опций — этот словарь и есть путь их задать).
+    Same output contract as VariationalIntegrator; holds the same
+    CompiledModel by composition. Arguments are documented in
+    docs/api-reference.md.
     """
 
-    # Допуск проверки сходимости: масштабированная невязка элемента
-    # не должна превышать RES_SAFETY * newton_tol (запас на остановку по шагу)
+    # A converged element must satisfy stage_res <= RES_SAFETY * newton_tol
+    # (the slack covers stopping on the step rather than on the residual)
     RES_SAFETY = 10.0
 
     def __init__(self, model, K=3, n_sub=1, newton_tol=1e-10, newton_maxiter=25,
@@ -249,11 +216,11 @@ class CollocationIntegrator:
         self.model = (model if isinstance(model, CompiledModel)
                       else CompiledModel(model))
         if int(n_sub) < 1:
-            raise ValueError(f"n_sub={n_sub}: должно быть >= 1")
+            raise ValueError(f"n_sub={n_sub}: must be >= 1")
         if float(newton_tol) <= 0:
-            raise ValueError(f"newton_tol={newton_tol}: должен быть > 0")
+            raise ValueError(f"newton_tol={newton_tol}: must be > 0")
         if int(newton_maxiter) < 1:
-            raise ValueError(f"newton_maxiter={newton_maxiter}: должно быть >= 1")
+            raise ValueError(f"newton_maxiter={newton_maxiter}: must be >= 1")
         self.colloc = RadauTables(K)
         self.n_sub = int(n_sub)
         self.newton_tol = float(newton_tol)
@@ -265,20 +232,19 @@ class CollocationIntegrator:
         self.steps = CollocationStepFunctions(
             self.model, self.colloc, self.newton_tol, self.newton_maxiter,
             rootfinder_plugin, rootfinder_options, self.n_threads)
-        self._node_inp_cache = {}    # входные сигналы на сетке
+        self._node_inp_cache = {}
 
     # ------------------------------------------------------------------
-    # Помощники, общие для одиночного и батчевого марша
+    # Helpers shared by the single and batched march
     # ------------------------------------------------------------------
     def _accumulate_sens(self, c0, x_all, Psi_all, Gamma_all, n_pts):
-        """Рекурсии чувствительностей по элементам -> плоский layout родителя.
+        """Element recursions -> the flat layout of the integrator contract.
 
         S_c <- Psi_e S_c (S_c[0] = I), S_th <- Psi_e S_th + Gamma_e (S_th[0]=0).
-        x_all: (nx, n_elems); Psi_all: (n_elems, nx, nx);
-        Gamma_all: (n_elems, nx, np). Точки t_eval — концы каждого n_sub-го
-        элемента, поэтому точка записывается раз в n_sub элементов.
-        Порядок умножений в рекурсиях менять нельзя — он зафиксирован
-        regression_test'ом на 1e-10.
+        x_all (nx, n_elems), Psi_all (n_elems, nx, nx),
+        Gamma_all (n_elems, nx, n_theta). The points of t_eval are the ends of
+        every n_sub-th element, so a point is recorded once per n_sub elements.
+        The order of the multiplications is frozen by regression_test at 1e-10.
         """
         nx, n_theta = self.model.nx, self.model.n_theta
         S_th, S_c = np.zeros((nx, n_theta)), np.eye(nx)
@@ -290,16 +256,15 @@ class CollocationIntegrator:
                 xs.append(np.asarray(x_all[:, e], float))
                 S_ths.append(S_th)
                 S_cs.append(S_c)
-        # len(xs) == n_pts по построению: (n_pts-1)*n_sub элементов дают
-        # n_pts-1 записей плюс начальная точка; формы проверит __post_init__
+        # len(xs) == n_pts by construction; __post_init__ checks the shapes
         traj = SensitivityTrajectory(np.array(xs), np.array(S_ths),
                                      np.array(S_cs))
         return traj.pack()
 
     def _node_inputs(self, t_eval):
-        """Входы u в узлах всех под-элементов сетки: (N-1, n_sub, K, nu)."""
-        # Массив нехешируем, поэтому ключ — его байты; безопасно, т.к. сюда
-        # t_eval всегда приходит уже нормализованным (asarray(..., float))
+        """Inputs u at the nodes of every sub-element: (N-1, n_sub, K, nu)."""
+        # An array is unhashable, so the key is its bytes; safe because t_eval
+        # always arrives here already normalized to a float array
         key = (t_eval.tobytes(), self.n_sub)
         cached = self._node_inp_cache.get(key)
         if cached is not None:
@@ -313,19 +278,14 @@ class CollocationIntegrator:
         t_nodes = t_eval[:-1, None, None] + offs[None, :, :] * h_int[:, None, None]
         flat_t = t_nodes.ravel()
 
-        # Общий помощник CompiledModel (векторный вызов с fallback по точкам);
-        # при nu == 0 он отдаёт (len, 0) — reshape ниже не ветвится
+        # For nu == 0 this returns (len, 0), so the reshape needs no branch
         inp = self.model._inp_on_times(flat_t).reshape(n_int, self.n_sub, K, nu)
 
         self._node_inp_cache[key] = inp
         return inp
 
-    # ------------------------------------------------------------------
-    # Шаг элемента: rootfinder по стадиям + Psi/Gamma через теорему
-    # о неявной функции (ca.jacobian дифференцирует сквозь rootfinder)
-    # ------------------------------------------------------------------
     def _march_inputs(self, theta, t_eval):
-        """Входы mapaccum (столбец на элемент): theta, u, h."""
+        """mapaccum inputs, one column per element: theta, u, h."""
         K, nu = self.colloc.K, self.model.nu
         n_elems = (len(t_eval) - 1) * self.n_sub
         inp_nodes = self._node_inputs(t_eval)                  # (n_int, n_sub, K, nu)
@@ -336,12 +296,12 @@ class CollocationIntegrator:
         return theta_cols, u_cols, h_cols
 
     def _unstack_mapaccum(self, x_stack, Psi_stack, Gamma_stack, n_elems):
-        """Разбор выходов mapaccum одного шута.
+        """Unpack the mapaccum outputs of one shot.
 
-        mapaccum стыкует матричные выходы элементов горизонтально:
-        Psi_stack = [Psi_1 | Psi_2 | ...] размера (nx, n_elems*nx), аналогично
-        Gamma. Возвращает (x_all (nx, n_elems), Psi_all (n_elems, nx, nx),
-        Gamma_all (n_elems, nx, np)).
+        mapaccum concatenates matrix outputs horizontally: Psi_stack is
+        [Psi_1 | Psi_2 | ...] of size (nx, n_elems*nx), and Gamma likewise.
+        Returns x_all (nx, n_elems), Psi_all (n_elems, nx, nx),
+        Gamma_all (n_elems, nx, n_theta).
         """
         nx, n_theta = self.model.nx, self.model.n_theta
         x_all = np.asarray(x_stack)
@@ -351,27 +311,27 @@ class CollocationIntegrator:
         return x_all, Psi_all, Gamma_all
 
     def _check_converged(self, stage_res):
-        """Проверка сходимости Ньютона по всем элементам (тихая замена
-        error_on_fail: без исключений из C++ и без дампов CasADi)."""
+        """Check stage Newton over all elements (see docs/pitfalls.md)."""
         stage_res = np.asarray(stage_res, float).ravel()
         if stage_res.size == 0:
             return
-        # nan -> inf, чтобы и расходимость, и NaN попали в ветку отказа
+        # nan -> inf so that both divergence and NaN take the failure branch
         clean = np.nan_to_num(stage_res, nan=np.inf)
         worst = float(np.max(clean))
         limit = self.RES_SAFETY * self.newton_tol
         if worst > limit:
             n_bad = int(np.sum(clean > limit))
             raise RuntimeError(
-                f"Коллокации: Ньютон по стадиям не сошёлся в {n_bad} из "
-                f"{stage_res.size} элементов (max масштабированной невязки "
+                f"Collocation: stage Newton did not converge in {n_bad} of "
+                f"{stage_res.size} elements (worst scaled residual "
                 f"{worst:.2e} > {limit:.1e}; max_iter={self.newton_maxiter}). "
-                f"Увеличьте n_sub (шаг элемента h = dt/n_sub станет меньше), "
-                f"ослабьте newton_tol или поднимите newton_maxiter. В пробной "
-                f"точке оптимизации это штатный отказ шага — цикл его откатит.")
+                f"Increase n_sub (the element step h = dt/n_sub gets smaller), "
+                f"relax newton_tol or raise newton_maxiter. At a trial point of "
+                f"the optimization this is a normal step rejection and the loop "
+                f"rolls it back.")
 
     # ------------------------------------------------------------------
-    # Марш по сетке: один шут и батч шутов
+    # Marching over the grid: one shot and a batch of shots
     # ------------------------------------------------------------------
     def _march_compiled(self, c0, theta, t_eval, with_sens):
         nx = self.model.nx
@@ -386,8 +346,8 @@ class CollocationIntegrator:
             self._check_converged(stage_res)
             out = np.empty((nx, n_pts))
             out[:, 0] = c0
-            # mapaccum отдаёт состояние после КАЖДОГО элемента; точки t_eval —
-            # концы каждого n_sub-го
+            # mapaccum returns the state after EVERY element; the points of
+            # t_eval are the ends of every n_sub-th one
             out[:, 1:] = np.asarray(x_stack)[:, self.n_sub - 1::self.n_sub]
             return out
 
@@ -400,15 +360,15 @@ class CollocationIntegrator:
 
     @staticmethod
     def _shoot_block(stack, j, n_elems, width):
-        """Блок шута j в выходе map (шуты состыкованы горизонтально).
+        """Block of shot j in a map output (shots are stacked horizontally).
 
-        Одна формула на три стека: ширина столбца элемента width равна 1 для
-        x, nx для Psi и n_theta для Gamma.
+        One formula for all three stacks: the per-element column width is 1 for
+        x, nx for Psi and n_theta for Gamma.
         """
         return stack[:, j * n_elems * width:(j + 1) * n_elems * width]
 
     def _march_group(self, idxs, c0_list, theta, t_grids):
-        """Группа шутов одной длины сетки одним потоковым map-вызовом."""
+        """A group of shots of equal grid length in one threaded map call."""
         nx, n_theta = self.model.nx, self.model.n_theta
         n_pts = len(t_grids[idxs[0]])
         n_elems = (n_pts - 1) * self.n_sub
@@ -437,11 +397,7 @@ class CollocationIntegrator:
         return outs
 
     def _march_batch_compiled(self, c0_list, theta, t_grids):
-        """Все шуты батча: группировка по длине сетки + потоковый map.
-
-        Входы уже нормализованы публичным методом (float-массивы, theta
-        обрезана до n_theta).
-        """
+        """All shots of a batch: grouped by grid length, then marched."""
         results = [None] * len(t_grids)
         for idxs in group_by_grid_length(t_grids):
             if len(idxs) == 1 or self.n_threads == 1:
@@ -456,11 +412,11 @@ class CollocationIntegrator:
         return results
 
     def _march(self, c0, theta, t_eval, with_sens):
-        """Нормализация входов + вырожденные сетки + запуск марша."""
+        """Normalize the inputs, handle degenerate grids, run the march."""
         c0 = np.asarray(c0, dtype=float)
         t_eval = np.asarray(t_eval, dtype=float)
         theta = np.asarray(theta, dtype=float)[:self.model.n_theta]
-        if len(t_eval) < 2:                    # нет ни одного элемента
+        if len(t_eval) < 2:                    # no elements at all
             if not with_sens:
                 return np.tile(c0.reshape(-1, 1), (1, len(t_eval)))
             row0 = initial_flat_row(c0, self.model.n_theta)
@@ -471,21 +427,21 @@ class CollocationIntegrator:
         return self._march_compiled(c0, theta, t_eval, with_sens)
 
     # ------------------------------------------------------------------
-    # Публичные интеграторы (контракт VariationalIntegrator сохранён)
+    # Public entry points (the VariationalIntegrator contract)
     # ------------------------------------------------------------------
     def get_jacobian_solution(self, c0, theta, t_eval):
-        """Состояние + чувствительности: строки [x; J_th.flatten(); J_c.flatten()]."""
+        """State and sensitivities in the flat layout (see sensitivity.py)."""
         return self._march(c0, theta, t_eval, with_sens=True)
 
     def get_solution(self, c0, theta, t_eval):
-        """Только состояние (nx, N)."""
+        """State only, (nx, N)."""
         return self._march(c0, theta, t_eval, with_sens=False)
 
-    # jax-имена маршрутизируются на ту же реализацию: для коллокационного
-    # интегратора флаг use_jax не имеет значения
+    # The jax-named entry points route to the same implementation: use_jax is
+    # meaningless for this integrator
     def get_jacobian_solution_jax_batch(self, c0_list, theta, t_grids):
-        # Нормализация входов — один раз здесь; внутренние методы марша
-        # работают только с float-массивами и theta длины n_theta
+        # Inputs are normalized once here; the internal march methods assume
+        # float arrays and a theta of length n_theta
         theta = np.asarray(theta, dtype=float)[:self.model.n_theta]
         c0_list = [np.asarray(c0, dtype=float) for c0 in c0_list]
         t_grids = [np.asarray(t, dtype=float) for t in t_grids]

@@ -62,7 +62,7 @@ def test_head_keeps_first_points():
 
 
 def test_inconsistent_shapes_are_rejected():
-    with pytest.raises(ValueError, match="несогласованные формы"):
+    with pytest.raises(ValueError, match="inconsistent shapes"):
         SensitivityTrajectory(x=np.zeros((5, 2)),
                               S_theta=np.zeros((5, 3, 4)),   # nx=3 против 2
                               S_c=np.zeros((5, 2, 2)))
