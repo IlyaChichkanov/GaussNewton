@@ -1,3 +1,8 @@
+"""Multiple-shooting problem assembly: shots, unknowns layout, residual rows.
+
+See docs/architecture.md for how this layer relates to the model, the
+integrator and the normal equations.
+"""
 import time
 from dataclasses import dataclass
 
@@ -10,24 +15,19 @@ from scipy.sparse import (bmat, block_diag, csr_matrix, diags, vstack, hstack)
 
 @dataclass
 class ShootRows:
-    """Готовые блоки одного шута — сырьё и для J/R, и для накопления H/g.
+    """Blocks of one shot, feeding both the sparse J and the accumulated H/g.
 
-    Две группы величин, которые раньше назывались одинаково:
-
-    J_* — строки ЯКОБИАНА НЕВЯЗОК (то, из чего собирается J):
+    Rows of the RESIDUAL Jacobian:
         J_theta : (m, n_obs, n_theta)  dr/dtheta = W (h_x S_theta + h_theta)
         J_c     : (m, n_obs, n_state)  dr/dc_j   = W  h_x S_c
-        r       : (m, n_obs)           взвешенные невязки W (y_i - h_i)
+        r       : (m, n_obs)           weighted residuals W (y_i - h_i)
 
-    S_*_end — ЧУВСТВИТЕЛЬНОСТИ СОСТОЯНИЯ в конце шута (не строки якобиана!),
-    из них собираются строки непрерывности:
+    State SENSITIVITIES at the end of the shot, from which the continuity
+    rows are built (not Jacobian rows):
         S_theta_end : (n_state, n_theta)   dx(tau_{j+1})/dtheta
         S_c_end     : (n_state, n_state)   dx(tau_{j+1})/dc_j
 
-    x_end — состояние в конце шута; c0 — начальное состояние шута.
-
-    В документе «MS and Orthogonal Collocations» начальное состояние
-    обозначено s; здесь это c_j данного шута, и второе имя не заводится.
+    x_end is the final state of the shot, c0 its initial state.
     """
     J_theta: np.ndarray
     J_c: np.ndarray
@@ -39,23 +39,17 @@ class ShootRows:
 
 
 class UnknownsLayout:
-    """Раскладка вектора неизвестных theta_full = [theta; c_1 .. c_T].
-
-    Раньше адресная арифметика («где в theta_full лежит c_j батча b»)
-    повторялась по месту в трёх функциях, причём смещение батча считалось
-    суммированием по interval_managers на каждом вызове. Здесь она одна и
-    строится один раз, в add_batch.
-    """
+    """Where things live in theta_full = [theta; c_1 .. c_T]."""
 
     def __init__(self, n_theta, n_state):
         self.n_theta = n_theta
         self.n_state = n_state
-        self._c_offsets = []      # начало c-блока каждого батча
+        self._c_offsets = []      # start of each batch's c-block
         self._n_shoots = []
         self.n_unknowns = n_theta
 
     def add_batch(self, n_shoot):
-        """Батч с ФАКТИЧЕСКИМ числом шутов (оно может отличаться от N_shoot)."""
+        """Register a batch by its ACTUAL shot count (may differ from N_shoot)."""
         self._c_offsets.append(self.n_unknowns)
         self._n_shoots.append(n_shoot)
         self.n_unknowns += n_shoot * self.n_state
@@ -65,7 +59,7 @@ class UnknownsLayout:
         return slice(0, self.n_theta)
 
     def c(self, batch, shoot):
-        """Слайс начального состояния шута `shoot` батча `batch`."""
+        """Slice of the initial state of shot `shoot` in batch `batch`."""
         start = self._c_offsets[batch] + shoot * self.n_state
         return slice(start, start + self.n_state)
 
@@ -74,12 +68,12 @@ class UnknownsLayout:
 
 
 class TimeIntervalManager:
-    """Разбиение сетки измерений на шуты.
+    """Splits a measurement grid into shots.
 
-    Фактическое число шутов (`self.N_shoot`) может отличаться от запрошенного:
-    узлы ставятся с постоянным шагом `len(t) // N_shoot`, поэтому при неполном
-    делении последний интервал длиннее остальных. Последняя точка сетки —
-    только стыковочная (в невязку измерений не входит).
+    The actual shot count (`self.N_shoot`) can differ from the requested one:
+    nodes are placed at a constant stride `len(t) // N_shoot`, so an inexact
+    division makes the last interval longer. The last point of a shot grid is
+    a junction point only and does not enter the measurement residual.
     """
 
     def __init__(self, N_shoot, t_eval_measurements):
@@ -87,25 +81,23 @@ class TimeIntervalManager:
         N_measurement = len(t_eval_measurements)
         if N_measurement < 2:
             raise ValueError(
-                f"Нужно минимум 2 точки измерений, получено {N_measurement}")
+                f"at least 2 measurement points are needed, got {N_measurement}")
         if int(N_shoot) < 1:
-            raise ValueError(f"N_shoot должен быть >= 1, получено {N_shoot}")
+            raise ValueError(f"N_shoot must be >= 1, got {N_shoot}")
 
         self.measurement_indexes = np.arange(N_measurement)
         step = N_measurement // int(N_shoot)
         if step < 1:
-            # step == 0 давал `ValueError: slice step cannot be zero` из среза ниже
+            # step == 0 used to surface as "slice step cannot be zero" below
             raise ValueError(
-                f"N_shoot={N_shoot} больше числа измерений ({N_measurement}); "
-                f"максимум для этой сетки — {N_measurement}")
+                f"N_shoot={N_shoot} exceeds the number of measurements "
+                f"({N_measurement}); the maximum for this grid is {N_measurement}")
 
         shoot_indexes = self.measurement_indexes[0:-1:step]
         self.shoot_indexes = np.append(shoot_indexes, self.measurement_indexes[-1])
         self.N_shoot = len(self.shoot_indexes) - 1
 
-        # Интервалы предвычислены: shoot_indexes уже задаёт границы, маски
-        # по measurement_indexes на каждый вызов не нужны. Сетка шута — его
-        # измерения плюс следующая точка (стыковочная).
+        # A shot's grid is its own measurements plus the next point (the junction)
         self._intervals = []
         for j in range(self.N_shoot):
             meas_idx = np.arange(self.shoot_indexes[j], self.shoot_indexes[j + 1])
@@ -114,20 +106,21 @@ class TimeIntervalManager:
             self._intervals.append((t_interval, meas_idx))
 
     def get_time_interval(self, shoot):
-        """(сетка шута с стыковочной точкой, индексы его измерений)."""
+        """(shot grid including the junction point, indices of its measurements)."""
         return self._intervals[shoot]
 
 
-
 class MultipleShooting:
+    """Gauss-Newton problem over [theta; shot initial states].
+
+    Arguments are documented in docs/api-reference.md.
+    """
 
     def __init__(self, system: ODESystem, N_shoot: int, gamma: np.ndarray = None,
                  c0_cost: float = 1, use_jax: bool = False, verbose: bool = False,
                  cont_scale=None):
-        # Модель и интегратор разделены: self.system — скомпилированная
-        # модель (f, h, якобианы, наблюдения), self.integrator — способ
-        # получить чувствительности шута. CollocationShooting подменяет
-        # ТОЛЬКО интегратор, модель остаётся общей.
+        # The model and the integrator are kept apart: CollocationShooting
+        # replaces only self.integrator, the model stays shared
         self.system = CompiledModel(system)
         self.integrator = VariationalIntegrator(self.system)
         self.N_shoot = N_shoot
@@ -136,9 +129,8 @@ class MultipleShooting:
         self.use_jax = use_jax
         self.verbose = verbose
         self.cont_scale = cont_scale
-        self._cont_w = None            # 1/масштаб по состояниям (кэш)
+        self._cont_w = None            # cached 1/scale per state
 
-        # Данные батчей и раскладка неизвестных
         self.state_measured_batches = []
         self.t_eval_measurements_batches = []
         self.interval_managers = []
@@ -150,26 +142,14 @@ class MultipleShooting:
         self.t_eval_measurements_batches.append(t_eval_measurements)
         self.interval_managers.append(tm)
         self.layout.add_batch(tm.N_shoot)
-        self._cont_w = None            # масштаб считается по всем батчам
+        self._cont_w = None            # the scale is computed over all batches
 
     def _cont_weights(self):
-        """Веса строк непрерывности 1/scale по состояниям (считаются один раз).
+        """Continuity row weights 1/scale, computed once and then fixed.
 
-        Зачем. Блок -mu*I седловой системы одинаково взвешивает невязки
-        стыковки ВСЕХ состояний, поэтому метод не инвариантен к единицам
-        измерения: та же задача с одной координатой в 1000 раз крупнее
-        решается заметно хуже (rel_err 9.5e-3 -> 2.8e-1, стыковка 1e-12 ->
-        1e-5). Деление строк стыковки на масштаб состояния убирает эту
-        зависимость: строки становятся безразмерными, и -mu*I снова
-        одинаково относится ко всем состояниям.
-
-        cont_scale: None — без масштабирования (поведение по умолчанию,
-        числа прежние); массив (nx,) — явные масштабы состояний;
-        'auto' — СКЗ измерений (доступно только при h(x) = x, иначе
-        измерения не дают масштабов состояний напрямую).
-
-        Веса ФИКСИРУЮТСЯ: менять их между итерациями нельзя — тогда
-        менялась бы сама merit-функция и gain ratio сравнивал бы разное.
+        cont_scale: None (no scaling), an (nx,) array of state scales, or
+        'auto' (RMS of the measurements, requires h(x) = x). The weights must
+        not change between iterations — see docs/math.md.
         """
         if self._cont_w is not None:
             return self._cont_w
@@ -181,39 +161,36 @@ class MultipleShooting:
         elif isinstance(req, str):
             if req != 'auto':
                 raise ValueError(
-                    f"cont_scale: ожидалось None, 'auto' или массив ({nx},), "
-                    f"получено {req!r}")
+                    f"cont_scale: expected None, 'auto' or an array ({nx},), "
+                    f"got {req!r}")
             if not self.system.identity_observation:
                 raise ValueError(
-                    "cont_scale='auto' работает только при тождественном "
-                    "наблюдении h(x) = x: иначе измерения не дают масштабов "
-                    "состояний. Передайте массив масштабов явно.")
+                    "cont_scale='auto' only works for the identity observation "
+                    "h(x) = x; otherwise the measurements do not give state "
+                    "scales. Pass an array of scales explicitly.")
             if not self.state_measured_batches:
-                raise ValueError("cont_scale='auto': сначала нужен add_batch")
+                raise ValueError("cont_scale='auto': add_batch must come first")
             meas = np.vstack([np.asarray(m, float)
                               for m in self.state_measured_batches])
             scale = np.sqrt((meas ** 2).mean(axis=0))
-            scale = np.where(scale > 0, scale, 1.0)      # константный нуль -> 1
+            scale = np.where(scale > 0, scale, 1.0)      # constant zero -> 1
         else:
             scale = np.asarray(req, dtype=float)
             if scale.shape != (nx,):
                 raise ValueError(
-                    f"cont_scale: ожидался массив ({nx},), получено {scale.shape}")
+                    f"cont_scale: expected an array ({nx},), got {scale.shape}")
             if np.any(scale <= 0):
-                raise ValueError("cont_scale: масштабы должны быть > 0")
+                raise ValueError("cont_scale: scales must be > 0")
 
         self._cont_w = 1.0 / scale
         return self._cont_w
 
-
     def make_full_theta(self, theta0, c0_guess=None, c0_init_method='inverse_h',
                         n_iter=1):
-        """theta_full = [theta0; c_1..c_T], c_j — из первого измерения шута.
+        """theta_full = [theta0; c_1..c_T], c_j from the shot's first measurement.
 
-        Способы инициализации c_j по (y, t) первой точки шута:
-        - 'inverse_h' (дефолт): обратить наблюдение Ньютоном (см. inverse_h);
-        - 'measurement_pad': скопировать измерение (годится при h(x) = x);
-        - 'zeros': нули.
+        c0_init_method: 'inverse_h' (invert the observation by Newton),
+        'measurement_pad' (copy the measurement, for h(x) = x) or 'zeros'.
         """
         n_state = self.system.nx
 
@@ -248,13 +225,7 @@ class MultipleShooting:
         return np.concatenate(parts)
 
     def _concatenate_jacobian_batches(self, jacobians):
-        """Собирает локальные якобианы батчей за один проход.
-
-        Первые ``n_theta`` столбцов общие для всех батчей, а оставшиеся
-        столбцы начальных состояний независимы. Поэтому итоговая матрица
-        состоит из вертикально склеенного блока параметров и блочно-
-        диагонального блока начальных состояний.
-        """
+        """Stack per-batch Jacobians: shared theta columns, block-diagonal c."""
         if not jacobians:
             raise ValueError("At least one batch Jacobian is required")
 
@@ -267,6 +238,7 @@ class MultipleShooting:
         return hstack([theta_block, c0_block], format='csr')
 
     def solve(self, theta_full):
+        """Reference assembly with an explicit J -> (J, R, J_G, R_G)."""
         solve_start = time.perf_counter()
 
         J_batches = []
@@ -299,11 +271,11 @@ class MultipleShooting:
         return J_total, R_total, J_G_total, R_G_total
 
     def shoot_rows(self, theta_full, state_measured, t_meas, batch_idx):
-        """Интегрирование шутов батча + наблюдения + веса -> список ShootRows.
+        """Integrate the shots of a batch and weight them -> list of ShootRows.
 
-        Общее ядро для обоих способов собрать задачу ГН: `_solve_batch`
-        складывает из этих блоков разреженную J, а накопительный путь
-        (`gauss_newton/normal_equations.py`) сразу сворачивает их в H и g.
+        The shared core of both assembly paths: _solve_batch builds a sparse J
+        out of these blocks, while gauss_newton/normal_equations.py folds them
+        straight into H and g.
         """
         n_state, n_theta, n_obs = self.system.dims()
         if self.gamma is not None and len(self.gamma) != n_obs:
@@ -316,27 +288,27 @@ class MultipleShooting:
                    for sh in range(tm.N_shoot)]
 
         if self.use_jax:
-            # Все шуты интегрируются одним батчевым вызовом (vmap/потоки внутри)
+            # All shots in one batched call (vmap or threads inside)
             flats = self.integrator.get_jacobian_solution_jax_batch(
                 c0_list, theta, [ti for ti, _ in intervals])
         else:
             flats = [self.integrator.get_jacobian_solution(c0, theta, ti)
                      for c0, (ti, _) in zip(c0_list, intervals)]
 
-        # gamma — это sqrt(W): невязка домножается на неё, а стоимость берёт
-        # квадрат, поэтому gamma = 1 означает sigma = 1, а не «вес 1»
+        # gamma is sqrt(W): the residual is multiplied by it and the cost
+        # squares it, so gamma = 1 means sigma = 1, not "weight 1"
         gamma = self.gamma if self.gamma is not None else np.ones(n_obs)
 
         rows = []
         for c0, flat, (t_interval, meas_idx) in zip(c0_list, flats, intervals):
             traj = SensitivityTrajectory.unpack(flat, n_state, n_theta)
-            # Точки 0..m-1 — измерения интервала; последняя точка сетки
-            # стыковочная, в невязку измерений не входит
+            # Points 0..m-1 are the measurements; the last grid point is the
+            # junction and does not enter the measurement residual
             m = len(meas_idx)
             meas = traj.head(m)
 
             if self.system.identity_observation:
-                # h(x) = x: dh/dx = I, dh/dtheta = 0 — якобианы наблюдения не нужны
+                # h(x) = x: dh/dx = I, dh/dtheta = 0
                 h_pred, J_theta_all, J_c_all = meas.x, meas.S_theta, meas.S_c
             else:
                 h_pred, dh_dx, dh_dtheta = self.system.observation_batch(
@@ -344,9 +316,8 @@ class MultipleShooting:
                 J_theta_all = np.einsum('mij,mjk->mik', dh_dx, meas.S_theta) + dh_dtheta
                 J_c_all = np.einsum('mij,mjk->mik', dh_dx, meas.S_c)
 
-            # c0_cost — дополнительный вес первой точки интервала
             W = np.tile(gamma, (m, 1))
-            W[0] *= self.c0_cost
+            W[0] *= self.c0_cost       # extra weight on the first point
 
             rows.append(ShootRows(
                 J_theta=W[:, :, None] * J_theta_all,
@@ -360,12 +331,12 @@ class MultipleShooting:
         return rows
 
     def continuity_rows(self, rows):
-        """Строки непрерывности (J_G, R_G) из финальных блоков шутов.
+        """Continuity rows (J_G, R_G) from the final blocks of the shots.
 
-        G_j = x_j(t_{j+1}; c_j, θ) − c_{j+1}: θ-часть — S_theta_end шута j,
-        c-часть блочно-бидиагональна (S_c_end в колонке шута j, −I в колонке j+1).
-        Строки делятся на масштаб состояния (см. `_cont_weights`); при
-        cont_scale=None веса равны 1 и числа не меняются.
+        G_j = x_j(t_{j+1}; c_j, theta) - c_{j+1}: the theta part is S_theta_end
+        of shot j, the c part is block-bidiagonal (S_c_end in column j, -I in
+        column j+1). Rows are divided by the state scale (see _cont_weights);
+        with cont_scale=None the weights are 1 and the numbers are unchanged.
         """
         n_state, n_theta, _ = self.system.dims()
         n_shoot = len(rows)
@@ -373,10 +344,9 @@ class MultipleShooting:
         if n_cont == 0:
             return csr_matrix((0, n_theta + n_shoot * n_state)), np.zeros(0)
 
-        w = self._cont_weights()                   # (n_state,), 1/масштаб
+        w = self._cont_weights()                   # (n_state,), 1/scale
         R_G = np.concatenate([w * -(rows[j].x_end - rows[j + 1].c0)
                               for j in range(n_shoot - 1)])
-        # По блочной строке на стык j|j+1: [S_theta_end_j | ... S_c_end_j, -I ...]
         minus_eye = -diags(w)
         blocks = []
         for j in range(n_shoot - 1):
@@ -390,8 +360,8 @@ class MultipleShooting:
         _, _, n_obs = self.system.dims()
         rows = self.shoot_rows(theta_full, state_measured, t_meas, batch_idx)
 
-        # Плотные блоки якобиана: θ-часть общая для всех строк, c-часть
-        # блочно-диагональна по шутам — итоговая J собирается одним hstack.
+        # Dense Jacobian blocks: the theta part is shared by all rows, the c
+        # part is block-diagonal over shots, so J is one hstack
         J = hstack([
             csr_matrix(np.vstack([r.J_theta.reshape(-1, r.J_theta.shape[2])
                                   for r in rows])),
@@ -402,5 +372,3 @@ class MultipleShooting:
 
         J_G, R_G = self.continuity_rows(rows)
         return J, J_G, R, R_G
-
-

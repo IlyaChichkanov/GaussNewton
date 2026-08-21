@@ -1,38 +1,26 @@
-# -*- coding: utf-8 -*-
-"""Инвариантность к единицам измерения состояний (cont_scale).
+"""Invariance to the units of the state (cont_scale).
 
-Блок -mu*I седловой системы одинаково взвешивает невязки стыковки всех
-состояний, поэтому без масштабирования метод зависит от единиц: одна и та же
-задача, где вторая координата выражена в 1000 раз более крупных единицах,
-сходится к той же точности, но стыковку затягивает на порядки хуже.
-
-Эталон здесь внешний и точный: ЗАДАЧА ТА ЖЕ, переписана в других единицах,
-поэтому оценка theta обязана совпасть, а качество стыковки при включённом
-cont_scale — восстановиться.
+The reference is external and exact: THE SAME PROBLEM written in different
+units, so the estimate of theta must agree and the quality of the junction
+must be restored once cont_scale is on. See docs/math.md.
 """
-from pathlib import Path
-import sys
 
 import numpy as np
 import pytest
 from casadi import vertcat
-
-repo_root = Path(__file__).parent.parent
-sys.path.insert(0, str(repo_root))
-
 from commom_utils.ode_system import ODESystem, SyntheticDataGenerator
 from commom_utils.systems import LotkaVoltera
 from gauss_newton.problem import MultipleShooting
 from gauss_newton.adaptive import run_optimization_adaptive
 
-S = 1e3                      # вторая координата в S раз крупнее
+S = 1e3                      # the second coordinate is S times larger
 TRUE = np.array([1.2, 0.4, 0.3, 0.1])
 THETA0 = np.array([1.0, 0.5, 0.2, 0.05])
 
 
 class LotkaVolteraScaled(ODESystem):
-    """Лотка-Вольтерра, где вторая координата измеряется в единицах в S раз
-    крупнее: y_s = S*y. Та же система, другие единицы."""
+    """Lotka-Volterra with the second coordinate in units S times larger:
+    y_s = S*y. The same system, different units."""
 
     def __init__(self):
         super().__init__(2, 4, 0)
@@ -71,8 +59,8 @@ def fit(cls, t_meas, meas, gamma, cont_scale=None):
 def test_continuity_scaling_restores_reference_quality(cont_scale):
     t_meas, meas = data()
     meas_scaled = meas.copy()
-    meas_scaled[:, 1] *= S                       # те же данные в других единицах
-    gamma_scaled = np.array([1.0, 1.0 / S])      # gamma = 1/sigma, тоже в единицах
+    meas_scaled[:, 1] *= S                       # the same data in other units
+    gamma_scaled = np.array([1.0, 1.0 / S])      # gamma = 1/sigma, also in units
 
     err_ref, cont_ref = fit(LotkaVoltera, t_meas, meas, np.ones(2))
     err_bad, cont_bad = fit(LotkaVolteraScaled, t_meas, meas_scaled, gamma_scaled)
@@ -80,16 +68,16 @@ def test_continuity_scaling_restores_reference_quality(cont_scale):
     err_fix, cont_fix = fit(LotkaVolteraScaled, t_meas, meas_scaled, gamma_scaled,
                             cont_scale=scale)
 
-    # без масштабирования стыковка деградирует на порядки
+    # without scaling the junction degrades by orders of magnitude
     assert cont_bad > 1e3 * cont_ref
-    # с масштабированием возвращается к уровню эталона
+    # with scaling it returns to the reference level
     assert cont_fix < 1e-3 * cont_bad
-    # оценка параметров при этом не хуже эталонной
+    # and the parameter estimate is no worse than the reference
     assert err_fix < 2 * max(err_ref, 1e-3)
 
 
 def test_cont_scale_default_is_identity():
-    """cont_scale=None -> веса ровно 1: числа прежние (regression_test)."""
+    """cont_scale=None -> weights of exactly 1, so the numbers are unchanged."""
     t_meas, meas = data()
     prob = MultipleShooting(system=LotkaVoltera(), N_shoot=5, gamma=np.ones(2),
                             use_jax=True)
@@ -107,9 +95,9 @@ def test_cont_scale_validation():
         prob.add_batch(meas, t_meas)
         return prob
 
-    with pytest.raises(ValueError, match="масштабы"):
+    with pytest.raises(ValueError, match="scales must be > 0"):
         make(np.array([1.0, -1.0]))._cont_weights()
-    with pytest.raises(ValueError, match="ожидался массив"):
+    with pytest.raises(ValueError, match="expected an array"):
         make(np.array([1.0, 1.0, 1.0]))._cont_weights()
-    with pytest.raises(ValueError, match="ожидалось"):
+    with pytest.raises(ValueError, match="expected None, 'auto' or an array"):
         make('rms')._cont_weights()
