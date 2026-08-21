@@ -1,7 +1,5 @@
 from dataclasses import asdict, dataclass
 
-import numpy as np
-
 @dataclass
 class CarParams:
     wheelbase: float

@@ -3,12 +3,14 @@ from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 import numpy as np
+import plotly.graph_objects as go
 import scipy.linalg as la
 from acados_template import AcadosOcpSolver
 from mhe.mhe_base_model_interface import MheModel
-from matplotlib.widgets import RangeSlider
+from plotly.colors import hex_to_rgb
+from plotly.subplots import make_subplots
 from tqdm import tqdm
-from typing import List, Optional
+from typing import Optional
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -367,16 +369,11 @@ def make_system_trajectory(mhe_model: MheModel,
     integrate_f = mhe_model.create_integrate_function(dt, "integrate")
     trajectory[0] = x_sim
     for j in range(horizon):
-        x_aug = np.hstack((x_sim, initial_theta))
         if j < horizon - 1:
             x_sim = np.array(integrate_f(x_sim, initial_theta, control_sequence[j, :])).T[0]
         trajectory[j + 1] = x_sim
     return trajectory
 
-
-import matplotlib.pyplot as plt
-import numpy as np
-from matplotlib.widgets import RangeSlider
 
 # def plot_mhe_results(results, overlap=0, initial_params=None, initial_std=None,
 #                      theta_true=None,
@@ -682,11 +679,6 @@ from matplotlib.widgets import RangeSlider
 #     plt.tight_layout()
 #     plt.show()
 
-import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from plotly.colors import hex_to_rgb
-
 # def plot_mhe_results(results, overlap=0, initial_params=None, initial_std=None,
 #                      theta_true=None, plot_states=True, plot_params=True,
 #                      plot_eigvals=True, plot_noise=True, plot_cost=True,
@@ -854,10 +846,7 @@ from plotly.colors import hex_to_rgb
 #                       template="plotly_white")
 #     print(f"Figure created with {len(fig.data)} traces.")
 #     return fig
-import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from plotly.colors import hex_to_rgb
+
 
 def plot_mhe_slider_lines(
     results,
@@ -1007,8 +996,8 @@ def plot_mhe_slider_lines(
                 fill="toself", fillcolor=f'rgba({r},{g},{b},0.2)',
                 line=dict(width=0), showlegend=False),
                 row=2, col=1)
-        except:
-            pass
+        except Exception:
+            pass                       # non-hex colour: skip the +-sigma band
         if theta_true is not None and i < len(theta_true):
             fig.add_trace(go.Scatter(x=[t_plot[0], t_plot[-1]], y=[theta_true[i], theta_true[i]],
                                      mode='lines', line=dict(dash='dot', color=color),
