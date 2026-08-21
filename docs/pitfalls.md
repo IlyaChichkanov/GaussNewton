@@ -111,7 +111,7 @@ anything numerical.
   `mhe` package with the one from SDA (`sys.path.insert(0, CODEGEN_ROOT)` in its
   first cell). The shared bootstrap cell must not be added there — it would
   override that order — and its kernel must be fresh, not shared with
-  `sintetic_data/mhe_test.ipynb`. A solver cache in SDA may have been built by a
+  `experiments/sintetic_data/mhe_test.ipynb`. A solver cache in SDA may have been built by a
   different acados version, in which case loading fails with
   `KeyError: 'code_gen_opts'`; the cure is `MHE_NB_FORCE_REBUILD=1`.
 
