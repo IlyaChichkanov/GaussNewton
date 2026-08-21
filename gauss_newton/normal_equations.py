@@ -1,6 +1,6 @@
 """Normal equations of the Gauss-Newton step: H = J^T J and g = J^T r.
 
-Two ways to get them — from an explicit J, or by accumulation over the
+Two ways to get them - from an explicit J, or by accumulation over the
 measurements without ever forming J. See docs/architecture.md and
 docs/math.md.
 """
@@ -20,7 +20,7 @@ class NormalEquations:
     """Normal equations at a point, without J itself.
 
     H, g       : H = J^T J, g = J^T r over the measurement residuals;
-    J_G, R_G   : continuity rows, kept separate — continuity is a CONSTRAINT,
+    J_G, R_G   : continuity rows, kept separate - continuity is a CONSTRAINT,
                  not an observation, both for the step and for the covariance;
     rss        : ||r||^2 over the measurements; n_rows: measurement row count.
     """
@@ -50,7 +50,7 @@ class NormalEquations:
         return self.rss + self.cont_sq()
 
     def merit(self, mu):
-        """Phi_mu = ||r||^2 + (1/mu)||R_G||^2 — what the step minimizes."""
+        """Phi_mu = ||r||^2 + (1/mu)||R_G||^2 - what the step minimizes."""
         return self.rss + self.cont_sq() / mu if self.R_G.size else self.rss
 
     def mu_curvature(self):
@@ -66,7 +66,7 @@ class NormalEquations:
         The theta block of the inverse KKT matrix [[H, J_G^T], [J_G, 0]], which
         is the projection of H^-1 onto the tangent subspace of the constraints;
         sigma^2 = ||r||^2 / dof uses the measurement residual only. Computing
-        it as (H + J_G^T J_G)^-1 instead is wrong — see docs/math.md.
+        it as (H + J_G^T J_G)^-1 instead is wrong - see docs/math.md.
         """
         n_params = self.H.shape[0]
         m = self.n_cont

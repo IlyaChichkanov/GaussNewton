@@ -149,7 +149,7 @@ class MultipleShooting:
 
         cont_scale: None (no scaling), an (nx,) array of state scales, or
         'auto' (RMS of the measurements, requires h(x) = x). The weights must
-        not change between iterations — see docs/math.md.
+        not change between iterations - see docs/math.md.
         """
         if self._cont_w is not None:
             return self._cont_w

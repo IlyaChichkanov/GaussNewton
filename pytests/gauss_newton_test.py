@@ -1,21 +1,15 @@
 import pytest
 import numpy as np
 import os
-from pathlib import Path
-import sys
-
-repo_root = Path(__file__).parent.parent
-sys.path.insert(0, str(repo_root))
-
 from commom_utils.systems import LotkaVoltera, Attractor
 from commom_utils.ode_system import SyntheticDataGenerator
 from gauss_newton.problem import MultipleShooting
 from gauss_newton.adaptive import run_optimization_adaptive
 from gauss_newton.utils import plot_solution
 
-# Фигуры plotly по умолчанию не открываем: fig.show() вешает headless-прогон
+# Figures stay closed by default: fig.show() hangs a headless run
 PLOT = os.environ.get("GN_TEST_PLOT", "0") not in ("0", "", "false", "False")
-# Словарь доступных систем с их конфигурациями
+# Systems under test and their configurations
 SYSTEMS_CONFIG = {
     "LotkaVolterra": {
         "class": LotkaVoltera,
@@ -26,11 +20,11 @@ SYSTEMS_CONFIG = {
         "noise_sigma": 1e-15,
         "N_shoot": 1,
         "mu": 0.0, 
-        "theta_init": np.array([1.0, 0.5, 0.2, 0.05]),  # смещённое начальное приближение
+        "theta_init": np.array([1.0, 0.5, 0.2, 0.05]),  # deliberately off
     },
     "Attractor": {
         "class": Attractor,
-        "true_params": np.array([10.0, 28.0, 8.0/3.0]),  # пример для Лоренца
+        "true_params": np.array([10.0, 28.0, 8.0/3.0]),  # Lorenz
         "initial_state": np.array([1.0, 1.0, 1.0]),
         "time_interval": (0.0, 5.0),
         "n_measurements": 100,
@@ -42,8 +36,7 @@ SYSTEMS_CONFIG = {
 }
 
 def pytest_generate_tests(metafunc):
-    """Динамическая параметризация: для каждого теста, который использует fixture 'system_name',
-       создаём отдельные вызовы для каждой системы из SYSTEMS_CONFIG."""
+    """One test invocation per system in SYSTEMS_CONFIG."""
     if "system_name" in metafunc.fixturenames:
         metafunc.parametrize("system_name", list(SYSTEMS_CONFIG.keys()), scope="function")
 
@@ -53,7 +46,7 @@ def system_config(system_name):
 
 @pytest.fixture
 def system(system_config):
-    """Создаёт экземпляр системы по имени."""
+    """Instantiate a system by name."""
     return system_config["class"]()
 
 @pytest.fixture
@@ -90,7 +83,7 @@ def test_identification(system, true_params, synthetic_data, system_config):
     t_meas, meas_batch, state_true_batch = synthetic_data
 
     N_shoot = system_config["N_shoot"]
-    gamma = np.ones(system.n_obs)  # веса измерений
+    gamma = np.ones(system.n_obs)  # measurement weights
     c0_cost = 1.0
     use_jax = False
 
@@ -107,21 +100,21 @@ def test_identification(system, true_params, synthetic_data, system_config):
     theta_full = ms.make_full_theta(theta_init)
 
 
-    # mu и lambda подбираются автоматически: system_config["mu"] больше не нужен
+    # mu and lambda are chosen automatically
     theta_full_opt, hist = run_optimization_adaptive(ms, theta_full, n_iter=20)
 
-    # Оценённые параметры
+    # Estimated parameters
     n_theta = len(true_params)
     theta_est = theta_full_opt[:n_theta]
 
-    # Относительная ошибка
+    # Relative error
     rel_error = np.abs((theta_est - true_params) / true_params)
     print(f"\nSystem: {system_config['class'].__name__}")
     print("True parameters:     ", true_params)
     print("Estimated parameters:", theta_est)
     print("Relative error:      ", rel_error)
 
-    # Проверка
+    # Check
     assert np.all(rel_error < 0.05), \
         f"Estimation error too high: {rel_error}"
 
@@ -141,6 +134,3 @@ def test_identification(system, true_params, synthetic_data, system_config):
             theta_true=None,
         )
         fig.show()
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--tb=short"])

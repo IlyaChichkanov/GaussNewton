@@ -55,7 +55,7 @@ class ODESystem:
 class CompiledModel:
     """Compiled model: f, h and their Jacobians, numpy and jax back ends.
 
-    The model only — integrators hold it by composition. See
+    The model only - integrators hold it by composition. See
     docs/api-reference.md.
     """
 
@@ -272,7 +272,7 @@ class VariationalIntegrator:
         S_c'     = f_x S_c,                 S_c(t_0)     = I
 
     Holds a CompiledModel by composition. Both back ends are explicit
-    (solve_ivp RK45 / jax dopri), so this path is not for stiff systems —
+    (solve_ivp RK45 / jax dopri), so this path is not for stiff systems -
     use CollocationIntegrator instead. See docs/math.md.
     """
 
@@ -383,7 +383,7 @@ class VariationalIntegrator:
                                dS[:, p:].ravel()])
 
     def _variational_rhs_jax(self, y, t, *theta):
-        """Extended right-hand side (jax) — the same scheme as above."""
+        """Extended right-hand side (jax) - the same scheme as above."""
         m = self.model
         n, p = m.nx, m.n_theta
         x, S_theta, S_c = split_row(y, n, p)
@@ -515,7 +515,7 @@ class SyntheticDataGenerator:
     def generate(self, c0, theta, time_intervals, n_measurements, seeds=None):
         """One batch per time interval.
 
-        Returns four lists — times, measurements, states, inputs — with one
+        Returns four lists - times, measurements, states, inputs - with one
         entry per interval.
         """
         if seeds is not None and len(seeds) != len(time_intervals):

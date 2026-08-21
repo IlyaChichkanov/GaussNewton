@@ -84,7 +84,7 @@ class CollocationStepFunctions:
         self.rootfinder_options = dict(rootfinder_options or {})
         self.n_threads = n_threads
 
-        # B (x) I — the Butcher table acting on the stacked stage vector
+        # B (x) I - the Butcher table acting on the stacked stage vector
         self._B_kron = np.kron(tables.butcher_a, np.eye(model.nx))
         self._step_fns = None
         # Separate caches on purpose: True == 1 in Python, so (n, True) and
@@ -163,7 +163,7 @@ class CollocationStepFunctions:
         x_next = z_sol[-nx:]
         Psi = ca.jacobian(x_next, x_prev)     # implicit function theorem
         Gamma = ca.jacobian(x_next, theta)
-        # Scaled residual at the solution — the convergence marker; on a
+        # Scaled residual at the solution - the convergence marker; on a
         # divergence (inf/nan in z) it is inf/nan as well
         stage_res = ca.norm_inf(phi_fn(z_sol, step_param)) \
             / (1.0 + ca.norm_inf(z_sol))

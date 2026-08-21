@@ -1,30 +1,21 @@
-import sys
-from pathlib import Path
-repo_root = Path(__file__).parent.parent
-sys.path.insert(0, str(repo_root))
-import sys
-import numpy as np
-import pytest
 import shutil
 from pathlib import Path
-import matplotlib.pyplot as plt
 
+import matplotlib.pyplot as plt
+import numpy as np
 import pytest
 
-# acados ставится из исходников, а не из PyPI: без него модуль
-# целиком пропускается, иначе падала СБОРКА всего pytests/
+# acados is built from source, not installed from PyPI; without it the whole
+# module is skipped, otherwise collection of all of pytests/ would fail
 pytest.importorskip("acados_template",
-                    reason="acados_template не установлен — см. README")
+                    reason="acados_template is not installed, see README")
 
-from acados_template import AcadosOcp
 from commom_utils.systems import KinematicBycicleErrors
 from mpc.mpc_base_interface import KinematicMpcCodegenerator
 from mpc.params import CarParams, MpcParams
 from mpc.mpc_control_utils import LateralMPCController, reset_solver_initial_guess
 from mpc.mpc_sim_utils import Simulator, SinusoidalCurveScenario, SimulationPlotter
 
-repo_root = Path(__file__).parent.parent
-sys.path.insert(0, str(repo_root))
 
 max_steering_wheel_angle = 440.0 # deg
 max_steering_wheel_angle_rate = 350.0 # deg/s
@@ -49,7 +40,6 @@ ddu_max = 1
 r_dist = (r_dist/ wheel_base)
 r_ang = (np.rad2deg(r_ang) / wheel_base)
 r_w = 3
-
 
 
 car_params = CarParams(
@@ -80,17 +70,17 @@ mpc_params = MpcParams(
     a_comf_max=5,
     final_cost=10.0
 )
-# Параметры симуляции
-SIMULATION_TIME = 15.0      # секунд
-TRACKING_TOLERANCE = 0.5   # максимально допустимая латеральная ошибка (м)
+# Simulation parameters
+SIMULATION_TIME = 15.0      # seconds
+TRACKING_TOLERANCE = 0.5   # largest acceptable lateral error, m
 
 # ---------------------------------------------------------------------
-# Фикстура и тест
+# Fixture and test
 # ---------------------------------------------------------------------
 def test_mpc_tracking():
     """
-    Запускает MPC-контроллер на кинематической модели велосипеда
-    и проверяет, что поперечная ошибка не превышает заданного порога.
+    Runs the MPC controller on a kinematic bicycle model and checks that the
+    lateral error stays under the tolerance.
     """
 
     scenario = SinusoidalCurveScenario(velocity=10.0, curv_amplitude=0.01, frequency=0.08)
@@ -102,19 +92,19 @@ def test_mpc_tracking():
 
     try:
 
-        # Генерация solver'а MPC (code generation)
+        # MPC solver code generation
         code_generator = KinematicMpcCodegenerator(mpc_params, tmp_gen_dir, "mpc_test")
         solver = code_generator.generate_code()
         reset_solver_initial_guess(solver)
 
-        # Траектория по времени
+        # Reference trajectory over time
         t_sim = np.arange(0.0, SIMULATION_TIME + ts, ts)
         trajectory = scenario.create_trajectory(t_sim)
 
-        # Система и сценарий
+        # System and scenario
         system = KinematicBycicleErrors(wheelbase=wheel_base)
 
-        # Контроллер и симуляция
+        # Controller and simulation
         controller = LateralMPCController(solver, trajectory)
         sim = Simulator(system, controller, trajectory, model_params = np.array([0.2, 0]), delay_cycles=11, use_jax=False)
         states, controls = sim.run(t_sim, x0=np.array([0.2, 0]))
@@ -125,21 +115,21 @@ def test_mpc_tracking():
             fig, axs = plotter.plot_all(include_jerk=True, include_comfort=True)
             plt.show()
 
-        # Оценка поперечной ошибки (первая переменная состояния)
+        # Lateral error (the first state variable)
         lateral_error = np.abs(states[:, 0])
         max_error = np.max(lateral_error)
-        print(f"Максимальная поперечная ошибка: {max_error:.4f} м (допуск: {TRACKING_TOLERANCE} м)")
+        print(f"Largest lateral error: {max_error:.4f} m (tolerance: {TRACKING_TOLERANCE} m)")
 
-        # Проверка соблюдения ограничений управления
+        # Control bounds must hold
         u_limits = car_params.u_max
         control_inputs = np.array(controls).flatten()
-        assert np.all(np.abs(control_inputs) <= u_limits + 1e-6), "Выход управления за пределы ограничений"
+        assert np.all(np.abs(control_inputs) <= u_limits + 1e-6), "control left its bounds"
 
-        # Основная проверка точности слежения
+        # The tracking accuracy check itself
         assert max_error <= TRACKING_TOLERANCE, \
-            f"Ошибка MPC {max_error:.4f} м превышает допустимую {TRACKING_TOLERANCE} м"
+            f"MPC error {max_error:.4f} m exceeds the tolerance {TRACKING_TOLERANCE} m"
     finally:
-        # 2. Всегда удаляем временную директорию после теста
+        # Always remove the temporary directory afterwards
         if tmp_gen_dir.exists():
             shutil.rmtree(tmp_gen_dir)
 

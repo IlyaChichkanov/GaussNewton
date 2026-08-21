@@ -6,8 +6,8 @@ from gauss_newton.problem import MultipleShooting
 class CollocationShooting(MultipleShooting):
     """MultipleShooting with self.integrator replaced; suitable for stiff systems.
 
-    Everything else — assembly of J/R/J_G/R_G, the mu machinery, the compiled
-    model in self.system — is inherited unchanged. See docs/architecture.md.
+    Everything else - assembly of J/R/J_G/R_G, the mu machinery, the compiled
+    model in self.system - is inherited unchanged. See docs/architecture.md.
     """
 
     def __init__(self, system, N_shoot, gamma=None, c0_cost=1, verbose=False,

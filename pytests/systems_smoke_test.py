@@ -1,34 +1,22 @@
-# -*- coding: utf-8 -*-
-"""Smoke-тест всех моделей из commom_utils/systems.py.
+"""Smoke test over every model in commom_utils/systems.py.
 
-Раньше несогласованность модели с объявленными размерностями всплывала только
-при попытке ею воспользоваться — в ноутбуке или в MHE. Здесь каждая модель
-строится и проверяется на самосогласованность:
+A model inconsistent with its declared sizes used to surface only when someone
+tried to use it. Here each one is built and checked for self-consistency:
 
-    - конструктор отрабатывает (observation должна возвращать SX, а не кортеж);
-    - get_derivative даёт ровно nx строк;
-    - observation даёт ровно n_obs строк;
-    - get_input_signals(t) даёт ровно nu сигналов;
-    - CompiledModel компилирует f, h и их якобианы.
-
-Тест ловит ровно тот класс ошибок, что был найден в ревью: Pendulum возвращал
-питоновский кортеж, RosenzweigMacArthur объявляла np=1 при шести
-распаковываемых параметрах.
+    - the constructor runs (observation must return an SX, not a tuple);
+    - get_derivative gives exactly nx rows;
+    - observation gives exactly n_obs rows;
+    - get_input_signals(t) gives exactly nu signals;
+    - CompiledModel compiles f, h and their Jacobians.
 """
-from pathlib import Path
-import sys
 
 import casadi as ca
 import numpy as np
 import pytest
-
-repo_root = Path(__file__).parent.parent
-sys.path.insert(0, str(repo_root))
-
 from commom_utils import systems as S
 from commom_utils.ode_system import CompiledModel, ODESystem
 
-# Аргументы конструктора для моделей, которым они нужны
+# Constructor arguments for the models that need them
 SYSTEM_ARGS = {
     "LateralCarDynamic": (2.65,),
     "KinematicBycicleErrors": (2.65,),
@@ -55,14 +43,14 @@ ALL_SYSTEMS = _all_system_classes()
 
 
 def test_system_list_is_not_empty():
-    assert len(ALL_SYSTEMS) >= 10, f"нашлось всего {len(ALL_SYSTEMS)} моделей"
+    assert len(ALL_SYSTEMS) >= 10, f"only {len(ALL_SYSTEMS)} models were found"
 
 
 @pytest.mark.parametrize("name,cls", ALL_SYSTEMS, ids=[n for n, _ in ALL_SYSTEMS])
 def test_system_dimensions_self_consistent(name, cls):
     system = cls(*SYSTEM_ARGS.get(name, ()))
 
-    # Размерности объявлены положительными и целыми
+    # Sizes are declared as positive integers
     assert system.nx >= 1, f"{name}: nx={system.nx}"
     assert system.n_theta >= 1, f"{name}: n_theta={system.n_theta}"
     assert system.nu >= 0, f"{name}: nu={system.nu}"
@@ -72,40 +60,39 @@ def test_system_dimensions_self_consistent(name, cls):
     theta = ca.SX.sym("theta", system.n_theta)
     u = ca.SX.sym("u", system.nu)
 
-    # Правая часть: ровно nx компонент.
-    # Ловит RosenzweigMacArthur (np=1, а распаковывалось 6 параметров):
-    # обращение к theta[5] при np=1 падает здесь.
+    # Right-hand side: exactly nx components. This is what catches a model
+    # that unpacks more parameters than it declares.
     f = ca.vertcat(system.get_derivative(x, theta, u))
     assert f.shape[0] == system.nx, \
-        f"{name}: get_derivative вернул {f.shape[0]} строк, ожидалось nx={system.nx}"
+        f"{name}: get_derivative returned {f.shape[0]} rows, expected nx={system.nx}"
 
-    # Наблюдение: ровно n_obs компонент и это SX, а не кортеж
+    # Observation: exactly n_obs components, and an SX rather than a tuple
     h = system.observation(x, theta, u)
     assert isinstance(h, (ca.SX, ca.MX)), \
-        f"{name}: observation вернула {type(h).__name__}, ожидался SX " \
-        f"(кортеж ломает вычисление n_obs в ODESystem.__init__)"
+        f"{name}: observation returned {type(h).__name__}, expected SX " \
+        f"(a tuple breaks the n_obs computation in ODESystem.__init__)"
     assert h.shape[0] == system.n_obs, \
-        f"{name}: observation вернула {h.shape[0]} строк, ожидалось n_obs={system.n_obs}"
+        f"{name}: observation returned {h.shape[0]} rows, expected n_obs={system.n_obs}"
 
-    # Входные сигналы. Часть моделей их не задаёт — тогда сигнал подставляет
-    # create_system из SYSTEM_CONFIGS, и базовый метод возвращает []. Но если
-    # модель метод ПЕРЕОПРЕДЕЛИЛА, длина обязана совпадать с nu.
+    # Input signals. Some models leave them to create_system, and the base
+    # method returns []; but a model that OVERRIDES the method must return
+    # exactly nu signals.
     if type(system).get_input_signals is not ODESystem.get_input_signals:
         signals = system.get_input_signals(0.5)
         assert len(signals) == system.nu, \
-            f"{name}: get_input_signals дал {len(signals)} сигналов, " \
-            f"ожидалось nu={system.nu}"
+            f"{name}: get_input_signals gave {len(signals)} signals, " \
+            f"expected nu={system.nu}"
 
 
 @pytest.mark.parametrize("name,cls", ALL_SYSTEMS, ids=[n for n, _ in ALL_SYSTEMS])
 def test_system_jacobian_compiles(name, cls):
-    """CompiledModel строит f, h и якобианы, и они считаются численно."""
+    """CompiledModel builds f, h and the Jacobians, and they evaluate."""
     base_system = cls(*SYSTEM_ARGS.get(name, ()))
 
     if (base_system.nu > 0
             and type(base_system).get_input_signals is ODESystem.get_input_signals):
-        # Модель ждёт вход извне (его подставляет create_system) — для smoke
-        # подставляем единицы, иначе CasADi получит 0 сигналов вместо nu
+        # The model expects inputs from outside (create_system supplies them);
+        # ones will do here, otherwise CasADi gets 0 signals instead of nu
         nu = base_system.nu
 
         class _WithInputs(cls):
@@ -120,17 +107,17 @@ def test_system_jacobian_compiles(name, cls):
 
     assert sj.dims() == (system.nx, system.n_theta, system.n_obs)
 
-    # Численный вызов в неособой точке. Ни нули, ни единицы не годятся:
-    # нули делят на vx/tau, а единицы обнуляют знаменатель 1 - c*d
-    # у KinematicBycicleErrors. 0.1 по состоянию и 0.5 по параметрам
-    # держат все знаменатели моделей вдали от нуля.
+    # Evaluate at a non-singular point. Neither zeros nor ones will do: zeros
+    # divide by vx/tau, and ones zero the denominator 1 - c*d of
+    # KinematicBycicleErrors. 0.1 for states and 0.5 for parameters keep every
+    # denominator away from zero.
     state = 0.1 * np.ones(system.nx)
     theta = 0.5 * np.ones(system.n_theta)
     t = 0.5
 
     f_val = sj.f(state, t, theta)
     assert f_val.shape == (system.nx,)
-    assert np.all(np.isfinite(f_val)), f"{name}: f не конечна"
+    assert np.all(np.isfinite(f_val)), f"{name}: f is not finite"
 
     h_val = sj.h(state, t, theta)
     assert h_val.shape == (system.n_obs,)

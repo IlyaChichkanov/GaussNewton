@@ -256,7 +256,7 @@ def _add_theta_panel(fig, row, history, labels, theta_true, ci_low, ci_high):
                 y=theta_true[i], line_dash='dash', line_color=color,
                 opacity=0.7, row=row, col=1,
                 # The panel is addressed explicitly and has data, so the empty
-                # subplot filter is unnecessary — and it breaks here: it reads
+                # subplot filter is unnecessary - and it breaks here: it reads
                 # trace.xaxis of every trace, which a Scatter3d does not have
                 exclude_empty_subplots=False,
             )
@@ -340,7 +340,7 @@ def plot_solution(
     """Figure of an identification run: trajectories, parameters, residuals.
 
     The panels are selected by the plot_* flags; `fig` is accepted for
-    backwards compatibility and ignored — a new figure is always built.
+    backwards compatibility and ignored - a new figure is always built.
     """
     if problem is None or theta_hist is None:
         raise ValueError("problem and theta_hist must be provided")

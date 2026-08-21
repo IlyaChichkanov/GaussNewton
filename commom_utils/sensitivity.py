@@ -45,7 +45,7 @@ class SensitivityTrajectory:
         )
 
     def pack(self):
-        """Back to the flat layout — the inverse of `unpack`."""
+        """Back to the flat layout - the inverse of `unpack`."""
         m = self.x.shape[0]
         return np.concatenate([
             self.x.T,
@@ -54,7 +54,7 @@ class SensitivityTrajectory:
         ])
 
     def head(self, m):
-        """First m points — a shot's measurements without the junction point."""
+        """First m points - a shot's measurements without the junction point."""
         return SensitivityTrajectory(self.x[:m], self.S_theta[:m], self.S_c[:m])
 
 
