@@ -1,23 +1,8 @@
-# -*- coding: utf-8 -*-
-"""Слой оптимизации: шаг ГН и цикл с адаптивной регуляризацией.
+"""Optimization layer: the Gauss-Newton step and the adaptive loop.
 
-Знает только про NormalEquations (H, g, J_G, R_G) из
-gauss_newton/normal_equations.py — как они получены (через большую J или
-накоплением по документу «MS and Orthogonal Collocations»), циклу безразлично.
-Теория и эксперименты: adaptive_regularization.ipynb.
-
-Единственный цикл оптимизации в проекте. Чем он отличается от прежней
-схемы с ручным расписанием mu (удалена вместе с compute_delta_gn):
-- lambda (демпфер Марквардта) адаптируется по gain ratio (схема Нильсена);
-- mu (обратный вес невязок стыковки: шаг — это ГН для
-  Phi_mu = ||R||^2 + (1/mu)||R_G||^2) стартует по кривизне
-  ||J_G||_F^2 / tr(H) и ужесточается по Пауэллу — только когда невязка
-  стыковки не падает сама И измерительная невязка застопорилась
-  (гейт rss_stall_tol);
-- шаг принимается по той же Phi_mu, для которой посчитан (rho > 0),
-  а не по '<= 1.1*best';
-- есть остановка (серия отказов / стагнация / pred ~ 0), поэтому n_iter —
-  верхняя граница, а не обязательный бюджет.
+Knows only NormalEquations (H, g, J_G, R_G); how they were obtained is
+irrelevant here. Theory and experiments: docs/math.md and
+adaptive_regularization.ipynb.
 """
 import numpy as np
 from scipy.sparse import diags, hstack, vstack, eye as speye
@@ -29,31 +14,23 @@ from gauss_newton.normal_equations import (confidence_intervals,
 
 
 def gn_step(ne, mu, lam, lambda_reg=0.0, lam_dual=None):
-    """Шаг из mu-регуляризованной седловой системы + pred для gain ratio.
+    """One step of the mu-regularized saddle system, plus pred.
 
-    Решается седловая система (mu-регуляризованная ККТ), плюс pred:
         [[H + D, J_G^T], [J_G, -mu I]] [delta; nu] = [g; R_G],
-    D = lambda_reg*I + lam*diag(H). Седловая форма вместо исключённой
-    (H + (1/mu) J_G^T J_G): при mu -> 0 исключённая теряет обусловленность
-    как O(1/mu), а здесь mu входит линейно.
+        D = lambda_reg*I + lam*diag(H)
 
-    pred = delta^T (g_eff + D delta) >= 0 — предсказанное моделью уменьшение
-    Phi_mu (вывод в adaptive_regularization.ipynb, §3); pred <= 0 возможен
-    только при численном сбое и трактуется циклом как отказ шага.
+    pred = delta^T (g_eff + D delta) >= 0 is the reduction of Phi_mu predicted
+    by the model; the caller treats pred <= 0 as a failed step.
 
-    lam_dual — оценка множителей Лагранжа для augmented-Lagrangian-режима
-    (эксперименты: adaptive_regularization.ipynb, раздел про AL). При
-    заданном lam_dual RHS блока ограничений сдвигается на -mu*lam_dual —
-    это шаг ГН для L_A = ||R||^2 - 2 lam_dual^T R_G + (1/mu)||R_G||^2
-    (у нас R_G = -G), в g_eff добавляется -J_G^T lam_dual, формула pred
-    не меняется. Возврат расширяется до (delta, pred, nu), где nu —
-    двойственное решение седловой системы: nu = lam_dual + (J_G delta -
-    R_G)/mu, то есть готовое первопорядковое обновление множителей.
-    При lam_dual=None возврат прежний (delta, pred) и числа побитово те же.
+    With lam_dual given, the constraint right-hand side is shifted by
+    -mu*lam_dual (the augmented-Lagrangian variant) and the return value
+    becomes (delta, pred, nu), nu being the first-order multiplier update.
+    Otherwise the return value is (delta, pred) and the numbers are unchanged.
+    See docs/math.md.
     """
     n = ne.H.shape[0]
-    # floor на диагонали: столбец, к которому невязки локально нечувствительны,
-    # иначе получил бы нулевое демпфирование и произвольно большой шаг
+    # Floor on the diagonal: a column the residuals are locally insensitive to
+    # would otherwise get zero damping and an arbitrarily large step
     D = lambda_reg * speye(n) + lam * diags(np.maximum(ne.H.diagonal(), 1e-10))
     nu = None
     if ne.n_cont > 0:
@@ -81,31 +58,14 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
                               mu_min=1e-8, mu_max=1e8,
                               rho_accept=0.0, max_rejects=8,
                               track_covariance=True, verbose=False):
-    """Итерации ГН с адаптивными lambda (Нильсен) и mu (кривизна + Пауэлл).
+    """Gauss-Newton iterations with adaptive lambda (Nielsen) and mu (Powell).
 
-    problem — любая задача со `solve` (MultipleShooting, CollocationShooting)
-    или с `normal_equations` (…Accum-классы: H и g копятся, J не строится).
+    `problem` is anything with `solve` (MultipleShooting, CollocationShooting)
+    or with `normal_equations` (the ...Accum classes). n_iter is an upper
+    bound: the loop stops on a run of rejections, on stalling, or on pred ~ 0.
 
-    Параметры безразмерны, дефолты проверены на ЛВ/Аттракторе/реальных данных:
-    - lam0: стартовый демпфер, дальше управляется gain ratio;
-    - mu_rule: 'curvature' (рекомендуется) — старт ||J_G||_F^2/tr(H),
-      ужесточение mu*mu_dec, когда ||R_G||^2 > viol_target*||R_G||^2_prev
-      И измерительная невязка застопорилась (см. rss_stall_tol);
-      'ratio' — mu = ||R_G||^2/(kappa*||R||^2) (хуже на реальных данных,
-      см. ноутбук §8);
-    - rss_stall_tol: гейт Пауэлла — mu ужимается только когда
-      ||R||^2 > rss_stall_tol*||R||^2_prev, т.е. измерения уже выжаты.
-      Без гейта mu утаптывается на ранних итерациях (rss падает на порядки,
-      стыковка колеблется), ограничения начинают доминировать и решение
-      запирается на консистентной траектории вдали от измерений — Attractor
-      при N_shoot=5 сходится с гейтом и не сходится без него;
-    - rho_accept: порог принятия шага по gain ratio;
-    - track_covariance: считать доверительные интервалы theta по ходу
-      (для plot_solution), стоит один splu на итерацию.
-
-    Возвращает (theta_full, hist); hist по итерациям (включая отклонённые —
-    там значения не меняются): theta, cost, mu, lam, r_meas, r_cont,
-    ci_low, ci_high; плюс accepted (номера принятых) и n_solves.
+    Returns (theta_full, hist); the arguments and the contents of hist are
+    documented in docs/api-reference.md, the schedules in docs/math.md.
     """
     theta_full = theta_full.copy()
     n_theta = problem.system.dims()[1]
@@ -113,10 +73,10 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
         ne = normal_equations_of(problem, theta_full)
     except RuntimeError as exc:
         raise RuntimeError(
-            "Интегратор не справился в НАЧАЛЬНОЙ точке theta0 (до первого шага "
-            "ГН). Для коллокаций: увеличьте n_sub (мельче элементы), ослабьте "
-            "newton_tol или поднимите newton_maxiter, либо выберите более "
-            f"правдоподобное theta0. Исходная ошибка: {exc}") from exc
+            "The integrator failed at the INITIAL point theta0, before the "
+            "first Gauss-Newton step. For collocation: increase n_sub, relax "
+            "newton_tol or raise newton_maxiter; otherwise pick a more "
+            f"plausible theta0. Original error: {exc}") from exc
 
     def mu_ratio(ne_):
         return float(np.clip(ne_.cont_sq() / (kappa * max(ne_.rss, 1e-300)),
@@ -124,7 +84,7 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
 
     lam, nu_esc = lam0, 2.0
     if ne.n_cont == 0:
-        mu = 1.0  # не используется: merit = ||R||^2
+        mu = 1.0  # unused: merit = ||R||^2
     elif mu_rule == 'curvature':
         mu = float(np.clip(ne.mu_curvature(), mu_min, mu_max))
     else:
@@ -146,8 +106,8 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
             ci_low, ci_high = confidence_intervals(theta_full[:n_theta], cov, dof)
             hist['ci_low'].append(ci_low)
             hist['ci_high'].append(ci_high)
-            # диагностика идентифицируемости из уже посчитанной ковариации:
-            # рост corr_cond = параметры уходят в плоскую долину
+            # Identifiability from the covariance already computed: a growing
+            # corr_cond means the parameters drift into a flat valley
             hist['corr_cond'].append(correlation_matrix(cov)[1])
 
     record()
@@ -164,8 +124,9 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
                 phi1 = ne_trial.merit(mu)
                 rho = (phi0 - phi1) / pred if np.isfinite(phi1) else -np.inf
             except RuntimeError:
-                # интегратор не справился с пробной точкой (например, Ньютон
-                # коллокаций не сошёлся) — это отказ шага, а не фатальная ошибка
+                # The integrator could not handle the trial point (for example
+                # collocation Newton did not converge): a failed step, not a
+                # fatal error
                 rho = -np.inf
         else:
             rho = -np.inf
@@ -177,9 +138,9 @@ def run_optimization_adaptive(problem, theta_full, n_iter=40,
             if ne.n_cont > 0:
                 cont, rss = ne.cont_sq(), ne.rss
                 if mu_rule == 'curvature':
-                    # Пауэлл с гейтом: ужесточаем штраф, только когда стыковка
-                    # сама не падает И измерения уже выжаты — пока rss падает,
-                    # mu не трогаем (иначе преждевременное запирание, docstring)
+                    # Powell with a gate: tighten the penalty only when the
+                    # junction is not improving on its own AND the measurements
+                    # are already squeezed out (see docs/math.md)
                     if cont > viol_target * prev_cont and rss > rss_stall_tol * prev_rss:
                         mu = max(mu * mu_dec, mu_min)
                     prev_cont, prev_rss = cont, rss

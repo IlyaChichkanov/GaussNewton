@@ -5,11 +5,10 @@ from pathlib import Path
 
 import numpy as np
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
-from casadi import SX, CodeGenerator, Function, jacobian, vertcat, reshape, fmax
+from casadi import SX, CodeGenerator, Function, jacobian, vertcat, reshape
 import casadi as ca
-from scipy.optimize import fsolve
 from mhe.params import MheParams
-from commom_utils.ocp_utils import generate_header, is_discrete
+from commom_utils.ocp_utils import generate_header
 from commom_utils.ode_system import ODESystem
 
 
@@ -192,7 +191,6 @@ class MheCogeGenerator(ABC):
         ocp_mhe.parameter_values = np.zeros((nu + n_obs_len + nx + n_theta + n_aug * n_aug,))
                 # Cost expressions (как у вас, но с учётом размерностей)
 
-        Q0 = self.params.state_prior_q0
         R = self.params.measurements_residual_r
         W = self.params.noise_peanlty_w
 

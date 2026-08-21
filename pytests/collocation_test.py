@@ -1,13 +1,6 @@
-from pathlib import Path
-import sys
-
 import numpy as np
 import pytest
 import casadi as ca
-
-repo_root = Path(__file__).parent.parent
-sys.path.insert(0, str(repo_root))
-
 from commom_utils.systems import LotkaVoltera, Attractor
 from commom_utils.ode_system import (ODESystem, SyntheticDataGenerator,
                                      VariationalIntegrator)
@@ -57,29 +50,29 @@ def generate_data(config):
 
 
 # ---------------------------------------------------------------------------
-# Таблицы Радо IIA
+# Radau IIA tables
 # ---------------------------------------------------------------------------
 def test_radau_tables():
     rt = RadauTables(3)
-    # Табличная матрица Бутчера Радо IIA (K=3, порядок 5)
+    # Tabulated Radau IIA Butcher matrix (K=3, order 5)
     a_ref = np.array([
         [0.19681547722366, -0.06553542585020,  0.02377097434822],
         [0.39442431473909,  0.29207341166523, -0.04154875212600],
         [0.37640306270047,  0.51248582618842,  0.11111111111111],
     ])
     assert np.allclose(rt.butcher_a, a_ref, atol=1e-10)
-    # A = 1 (x) I: каждая стадия стартует из левого края
+    # A = 1 (x) I: every stage starts from the left edge
     assert np.allclose(-rt.butcher_a @ rt.d0, np.ones(3), atol=1e-12)
-    # Правый узел совпадает с концом элемента
+    # The right node coincides with the end of the element
     assert rt.tau[-1] == 1.0
 
-    # K=1 — неявный Эйлер
+    # K=1 is implicit Euler
     rt1 = RadauTables(1)
     assert np.allclose(rt1.butcher_a, [[1.0]])
 
 
 # ---------------------------------------------------------------------------
-# Интегратор против эталона (вариационные уравнения, жёсткий допуск)
+# Integrator against the reference (variational equations, tight tolerance)
 # ---------------------------------------------------------------------------
 def test_integrator_matches_reference():
     system = LotkaVoltera()
@@ -99,14 +92,14 @@ def test_integrator_matches_reference():
     rel = np.abs(sol_c - sol_ref) / scale
     assert rel.max() < 1e-8, f"max rel diff {rel.max():.2e}"
 
-    # get_solution согласован с get_jacobian_solution
+    # get_solution agrees with get_jacobian_solution
     nx = system.nx
     state_only = colloc.get_solution(c0, theta, t_eval)
     assert np.allclose(state_only, sol_c[:nx], atol=1e-14)
 
 
 # ---------------------------------------------------------------------------
-# IND: чувствительности — точные производные дискретной схемы
+# IND: the sensitivities are exact derivatives of the discrete scheme
 # ---------------------------------------------------------------------------
 def test_ind_property():
     system = LotkaVoltera()
@@ -134,9 +127,9 @@ def test_ind_property():
 
 
 # ---------------------------------------------------------------------------
-# Жёсткая линейная система: dx/dt = -theta (x - sin t) + cos t
-# Точное решение: x(t) = sin t + (c0) e^{-theta t}; L-устойчивость
-# позволяет шаг h=0.1 при theta=1000 (явному методу нужен h ~ 1/theta)
+# Stiff linear system: dx/dt = -theta (x - sin t) + cos t, whose exact
+# solution is x(t) = sin t + c0 e^{-theta t}. L-stability allows h=0.1 at
+# theta=1000, where an explicit method would need h ~ 1/theta
 # ---------------------------------------------------------------------------
 class StiffLinear(ODESystem):
     def __init__(self):
@@ -159,15 +152,16 @@ def test_stiff_simulation():
     x = colloc.get_solution(c0, theta, t_eval)[0]
     exact = np.sin(t_eval) + np.exp(-theta[0] * t_eval)
 
-    # Пограничный слой: на первом узле ошибка ~|R(-h theta)| ~ 2.5e-2,
-    # затем гаснет мультипликативно до уровня интерполяции гладкой части (~1e-8).
-    # Явная схема при h*theta = 100 расходится; здесь решение остаётся ограниченным.
+    # Boundary layer: the error at the first node is ~|R(-h theta)| ~ 2.5e-2
+    # and then decays multiplicatively to the interpolation level (~1e-8) of the
+    # smooth part. An explicit scheme diverges at h*theta = 100; here the
+    # solution stays bounded.
     assert np.abs(x - exact).max() < 0.05
     assert np.abs(x[5:] - exact[5:]).max() < 1e-6
 
 
 # ---------------------------------------------------------------------------
-# Сквозная идентификация через run_optimization_adaptive
+# End-to-end identification through run_optimization_adaptive
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("system_name", list(SYSTEMS_CONFIG.keys()))
 def test_identification(system_name):
@@ -192,7 +186,7 @@ def test_identification(system_name):
 
 
 # ---------------------------------------------------------------------------
-# Согласие с MultipleShooting (быстрая система)
+# Agreement with MultipleShooting (non-stiff system)
 # ---------------------------------------------------------------------------
 def test_agrees_with_multiple_shooting():
     config = SYSTEMS_CONFIG["LotkaVolterra"]
@@ -210,7 +204,3 @@ def test_agrees_with_multiple_shooting():
 
     diff = np.abs(estimates["ms"] - estimates["colloc"])
     assert diff.max() < 1e-3, f"MS vs collocation mismatch: {diff}"
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--tb=short"])

@@ -1,30 +1,23 @@
-# -*- coding: utf-8 -*-
-"""Проверка собранного якобиана против конечных разностей.
+"""The assembled Jacobian against finite differences.
 
-Зачем отдельный тест. Остальные сверки в pytests/ — взаимные: накопительный
-путь сравнивается с плотным (accumulated_test), коллокации — с solve_ivp
-(collocation_test), adaptive — с плотным решением (adaptive_test). Все они
-делят общее ядро MultipleShooting.shoot_rows, поэтому систематическая ошибка
-в нём прошла бы через любую из этих сверок незамеченной.
+Why a separate test: every other check in pytests/ is mutual - the accumulated
+path against the dense one, collocation against solve_ivp, adaptive against a
+dense solve. They all share MultipleShooting.shoot_rows, so a systematic error
+there would pass through any of them unnoticed.
 
-Здесь эталон независимый: центральные разности вектора невязок
-r(theta_full) = [R; R_G], посчитанного тем же solve(). Проверяется знаковое
-соглашение всего кода:
+The reference here is independent: central differences of the residual vector
+r(theta_full) = [R; R_G] computed by the same solve(). This pins down the sign
+convention of the whole code:
 
     [J; J_G] = -d[R; R_G]/d theta_full
 
-(J — якобиан ПРЕДСКАЗАНИЙ, а невязка R = W(y - h), отсюда минус; ровно на
-этом соглашении построен gn_step, где rhs = [J^T R; R_G]).
+(J is the Jacobian of the PREDICTIONS while the residual is R = W(y - h),
+hence the minus; gn_step is built on exactly this convention, with
+rhs = [J^T R; R_G]).
 """
-from pathlib import Path
-import sys
 
 import numpy as np
 import pytest
-
-repo_root = Path(__file__).parent.parent
-sys.path.insert(0, str(repo_root))
-
 from commom_utils.systems import Integrator, LotkaVoltera, MassSpringDamper
 from commom_utils.ode_system import SyntheticDataGenerator
 from gauss_newton.problem import MultipleShooting
@@ -43,13 +36,13 @@ def _make_data(system, c0, theta_true, t_end=2.0, n_meas=21, seed=0):
 
 
 def _residuals(problem, theta_full):
-    """Вектор невязок [R; R_G] — то, что дифференцируем численно."""
+    """The residual vector [R; R_G] - what is differentiated numerically."""
     _, R, _, R_G = problem.solve(theta_full)
     return np.concatenate([R, R_G])
 
 
 def _fd_jacobian(problem, theta_full, rel_step=1e-7):
-    """Центральные разности d[R; R_G]/d theta_full."""
+    """Central differences of d[R; R_G]/d theta_full."""
     n = len(theta_full)
     columns = []
     for i in range(n):
@@ -68,19 +61,19 @@ def _assembled_jacobian(problem, theta_full):
 
 
 # ---------------------------------------------------------------------------
-# Вариационные уравнения (solve_ivp)
+# Variational equations (solve_ivp)
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("n_shoot", [1, 3])
 def test_jacobian_matches_finite_differences(n_shoot):
-    """J и J_G совпадают с -d[R; R_G]/dp для multiple shooting."""
+    """J and J_G match -d[R; R_G]/dp for multiple shooting."""
     system = LotkaVoltera()
     t_meas, meas = _make_data(system, np.array([6.0, 5.0]),
                               np.array([1.2, 0.4, 0.3, 0.1]))
 
     problem = MultipleShooting(system, N_shoot=n_shoot, gamma=np.ones(2),
                                c0_cost=1.0, use_jax=False)
-    # Допуски интегратора жёстче обычных: иначе ошибка solve_ivp (1e-5 по
-    # умолчанию) доминирует над разностной производной и сверять нечего
+    # Tighter integrator tolerances than usual: otherwise the solve_ivp error
+    # (1e-5 by default) dominates the difference quotient
     problem.integrator.ATOL = problem.integrator.RTOL = 1e-12
     problem.add_batch(meas, t_meas)
 
@@ -91,17 +84,18 @@ def test_jacobian_matches_finite_differences(n_shoot):
     assert J_code.shape == J_num.shape
     scale = max(np.abs(J_num).max(), 1e-12)
     err = np.abs(J_code + J_num).max() / scale
-    assert err < 1e-6, f"J не совпадает с конечными разностями: rel err {err:.2e}"
+    assert err < 1e-6, f"J disagrees with finite differences: rel err {err:.2e}"
 
 
 def test_jacobian_matches_finite_differences_with_input():
-    """Система со входом и НЕтождественным наблюдением (h = x_0, n_obs < nx).
+    """A system with an input and a NON-identity observation (h = x_0).
 
-    Здесь не срабатывает быстрый путь identity_observation, поэтому
-    проверяется ветка через observation_batch (dh/dx, dh/dtheta).
+    The identity_observation fast path does not apply here, so this exercises
+    the observation_batch branch (dh/dx, dh/dtheta).
 
-    Вход намеренно гладкий: у MassSpringDamper сигнал разрывен при t=1, и
-    adaptive solve_ivp перешагивает излом с неконтролируемой ошибкой — см.
+    The input is deliberately smooth: the MassSpringDamper signal is
+    discontinuous at t=1 and the adaptive solve_ivp steps over the kink with
+    an uncontrolled error - see
     test_discontinuous_input_degrades_sensitivities.
     """
     system = Integrator()
@@ -116,15 +110,16 @@ def test_jacobian_matches_finite_differences_with_input():
     theta_full = problem.make_full_theta(np.array([0.85]),
                                          c0_init_method='zeros')
     J_code = _assembled_jacobian(problem, theta_full)
-    # Шаг разностей крупнее, чем в тесте выше: состояние Integrator растёт
-    # как t^2, шум округления solve_ivp на этих величинах ~1e-11, и при
-    # rel_step=1e-7 разностная производная тонет в нём (ошибка падает
-    # строго как 1/h — проверено). 1e-4 — компромисс шум/срез.
+    # A larger difference step than in the test above: the Integrator state
+    # grows as t^2, the solve_ivp round-off noise at those magnitudes is
+    # ~1e-11, and at rel_step=1e-7 the difference quotient drowns in it (the
+    # error falls exactly as 1/h - checked). 1e-4 balances noise against
+    # truncation.
     J_num = _fd_jacobian(problem, theta_full, rel_step=1e-4)
 
     scale = max(np.abs(J_num).max(), 1e-12)
     err = np.abs(J_code + J_num).max() / scale
-    assert err < 1e-5, f"J не совпадает с конечными разностями: rel err {err:.2e}"
+    assert err < 1e-5, f"J disagrees with finite differences: rel err {err:.2e}"
 
 
 def _fd_error(problem, theta_full):
@@ -134,17 +129,17 @@ def _fd_error(problem, theta_full):
 
 
 def test_discontinuous_input_degrades_sensitivities():
-    """Документирует ограничение: разрывный по времени входной сигнал.
+    """Documents a limitation: a time-discontinuous input signal.
 
-    MassSpringDamper держит вход нулевым при t < 1 и включает его скачком.
-    Явный адаптивный solve_ivp про излом не знает: он перешагивает точку
-    разрыва, и на интервале, её содержащем, контроль ошибки не работает —
-    чувствительности теряют несколько порядков точности. Пока разрыв не
-    пересечён, якобиан совпадает с разностями до ~1e-8.
+    MassSpringDamper holds its input at zero for t < 1 and then switches it on
+    abruptly. The explicit adaptive solve_ivp knows nothing about the kink: it
+    steps over it, error control stops working on the interval containing it,
+    and the sensitivities lose several digits. Before the discontinuity is
+    crossed the Jacobian agrees with the differences to ~1e-8.
 
-    Тест фиксирует факт, а не «правильное» поведение: если интегратор
-    научат ставить узел в точку разрыва (t_eval/max_step или нарезка шутов
-    по излому), тест упадёт — и это будет поводом его обновить.
+    The test records the fact, not the desirable behaviour: if the integrator
+    is taught to put a node at the discontinuity, this test will fail - and
+    that will be the moment to update it.
     """
     system = MassSpringDamper()
     theta0 = np.array([2.7, 1.2])
@@ -158,20 +153,21 @@ def test_discontinuous_input_degrades_sensitivities():
         problem.add_batch(meas, t_meas)
         return problem, problem.make_full_theta(theta0)
 
-    err_before = _fd_error(*build(0.9))    # целиком до разрыва
-    err_across = _fd_error(*build(3.0))    # интервал содержит t = 1
+    err_before = _fd_error(*build(0.9))    # entirely before the discontinuity
+    err_across = _fd_error(*build(3.0))    # the interval contains t = 1
 
     assert err_before < 1e-7, (
-        f"на гладком участке якобиан обязан сходиться: {err_before:.2e}")
+        f"on a smooth stretch the Jacobian must converge: {err_before:.2e}")
     assert err_across > 100 * err_before, (
-        "ожидалась потеря точности на разрыве входа; если её больше нет — "
-        f"интегратор починили, обновите тест (before {err_before:.2e}, "
+        "expected a loss of accuracy at the input discontinuity; if it is "
+        f"gone the integrator was fixed, so update this test (before "
+        f"{err_before:.2e}, "
         f"across {err_across:.2e})")
 
 
 # ---------------------------------------------------------------------------
-# Коллокации: IND даёт ТОЧНЫЕ производные дискретной схемы, поэтому
-# согласие с разностями той же схемы должно быть заметно лучше
+# Collocation: IND gives EXACT derivatives of the discrete scheme, so the
+# agreement with differences of that same scheme should be markedly better
 # ---------------------------------------------------------------------------
 def test_collocation_jacobian_matches_finite_differences():
     system = LotkaVoltera()
@@ -188,14 +184,14 @@ def test_collocation_jacobian_matches_finite_differences():
 
     scale = max(np.abs(J_num).max(), 1e-12)
     err = np.abs(J_code + J_num).max() / scale
-    assert err < 1e-7, f"IND-якобиан расходится с разностями схемы: {err:.2e}"
+    assert err < 1e-7, f"the IND Jacobian disagrees with the scheme: {err:.2e}"
 
 
 # ---------------------------------------------------------------------------
-# Градиент нормальных уравнений: g = J^T R должен быть -1/2 grad ||R||^2
+# Gradient of the normal equations: g = J^T R must be -1/2 grad ||R||^2
 # ---------------------------------------------------------------------------
 def test_gradient_matches_finite_differences():
-    """g из NormalEquations согласован с численным градиентом ||R||^2."""
+    """g from NormalEquations agrees with the numeric gradient of ||R||^2."""
     system = LotkaVoltera()
     t_meas, meas = _make_data(system, np.array([6.0, 5.0]),
                               np.array([1.2, 0.4, 0.3, 0.1]))
@@ -220,7 +216,7 @@ def test_gradient_matches_finite_differences():
         minus[i] -= h
         g_num[i] = (rss(plus) - rss(minus)) / (2.0 * h)
 
-    # g = J^T R, а d||R||^2/dp = 2 R^T dR/dp = -2 J^T R  =>  g = -g_num / 2
+    # g = J^T R and d||R||^2/dp = 2 R^T dR/dp = -2 J^T R  =>  g = -g_num / 2
     scale = max(np.abs(g_num).max(), 1e-12)
     err = np.abs(g_code + g_num / 2.0).max() / scale
-    assert err < 1e-6, f"g не согласован с градиентом ||R||^2: rel err {err:.2e}"
+    assert err < 1e-6, f"g disagrees with the gradient of ||R||^2: rel err {err:.2e}"

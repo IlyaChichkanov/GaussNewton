@@ -1,12 +1,5 @@
-from pathlib import Path
-import sys
-
 import numpy as np
 import pytest
-
-repo_root = Path(__file__).parent.parent
-sys.path.insert(0, str(repo_root))
-
 from commom_utils.systems import LotkaVoltera, Attractor
 from commom_utils.ode_system import SyntheticDataGenerator
 from gauss_newton.problem import MultipleShooting
@@ -33,9 +26,9 @@ SYSTEMS_CONFIG = {
         "n_measurements": 100,
         "noise_sigma": 0.01,
         "N_shoot": 20,
-        # заведомо плохое начальное приближение: baseline с неудачным mu0
-        # (например 0.01) отсюда расходится - адаптивная схема должна пройти
-        # без какого-либо ручного mu
+        # a deliberately poor starting point: a fixed unlucky mu0 (0.01, say)
+        # diverges from here, while the adaptive schedule must get through
+        # without any manual mu
         "theta_init": np.array([0.0, 0.0, 0.0]),
     },
 }
@@ -69,14 +62,14 @@ def rel_err(theta, true):
 
 
 # ---------------------------------------------------------------------------
-# Шаг: совпадение с плотным решением той же седловой системы
+# The step against a dense solve of the same saddle system
 # ---------------------------------------------------------------------------
 def test_step_matches_dense_saddle_solve():
-    """gn_step решает ровно ту систему, которая написана в его docstring.
+    """gn_step solves exactly the system its docstring claims.
 
-    Эталон здесь ВНЕШНИЙ: седловая матрица собирается плотно и решается
-    numpy.linalg.solve, а не второй копией нашего же разреженного кода.
-    Проверяется и матрица, и правая часть:
+    The reference is EXTERNAL: the saddle matrix is assembled densely and
+    solved by numpy.linalg.solve, not by a second copy of our sparse code.
+    Both the matrix and the right-hand side are checked:
 
         [[H + lambda_reg I + lam diag(H), J_G^T], [J_G, -mu I]] [d; nu] = [g; R_G]
     """
@@ -103,11 +96,11 @@ def test_step_matches_dense_saddle_solve():
 
 
 def test_step_with_multipliers_matches_dense_saddle_solve():
-    """gn_step(..., lam_dual): AL-сдвиг правой части и возврат nu.
+    """gn_step(..., lam_dual): the AL shift of the right-hand side and nu.
 
-    Эталон внешний, как и выше: та же плотная седловая матрица, RHS блока
-    ограничений сдвинут на -mu*lam_dual; nu — двойственная часть решения.
-    Плюс инвариант: при lam_dual = 0 шаг побитово совпадает с обычным.
+    The same external reference: the dense saddle matrix with the constraint
+    block shifted by -mu*lam_dual; nu is the dual part of the solution. Plus
+    the invariant that lam_dual = 0 reproduces the plain step bit for bit.
     """
     config = SYSTEMS_CONFIG["LotkaVolterra"]
     _, t_meas, meas = generate_data(config)
@@ -132,7 +125,7 @@ def test_step_with_multipliers_matches_dense_saddle_solve():
     scale = np.abs(sol_ref).max()
     assert np.abs(delta - sol_ref[:n]).max() < 1e-9 * scale
     assert np.abs(nu - sol_ref[n:]).max() < 1e-9 * scale
-    # nu = lam_dual + (J_G delta - R_G)/mu — первопорядковое обновление
+    # nu = lam_dual + (J_G delta - R_G)/mu is the first-order update
     nu_formula = lam_dual + (J_G @ delta - R_G) / mu
     assert np.abs(nu - nu_formula).max() < 1e-8 * max(np.abs(nu).max(), 1.0)
 
@@ -154,13 +147,13 @@ def test_pred_positive_across_regimes():
         for lam in [1e-6, 1e-3, 1.0]:
             delta, pred = gn_step(ne, mu, lam)
             assert np.all(np.isfinite(delta))
-            assert pred > 0, f"pred <= 0 при mu={mu}, lam={lam}"
-    # merit согласован с pred по построению: Phi_mu >= 0
+            assert pred > 0, f"pred <= 0 at mu={mu}, lam={lam}"
+    # merit agrees with pred by construction: Phi_mu >= 0
     assert ne.merit(1.0) >= 0
 
 
 # ---------------------------------------------------------------------------
-# Сквозная идентификация без ручного mu (у Аттрактора - из theta = 0)
+# End-to-end identification without a manual mu (Attractor starts at theta = 0)
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("system_name", list(SYSTEMS_CONFIG.keys()))
 def test_identification_adaptive(system_name):
@@ -177,22 +170,21 @@ def test_identification_adaptive(system_name):
           f"solves={hist['n_solves']}")
     assert err < 0.05, f"Estimation error too high: {err}"
     assert len(hist["accepted"]) > 0
-    # mu стартует по кривизне и не растёт при отказах
+    # mu starts from the curvature and never grows on rejections
     assert hist["mu"][0] > 0
     assert hist["mu"][-1] <= hist["mu"][0] + 1e-15
 
 
 # ---------------------------------------------------------------------------
-# Гейт Пауэлла (rss_stall_tol): Аттрактор сходится и при МАЛОМ числе шутов
+# Powell's gate (rss_stall_tol): the attractor converges with FEW shots too
 # ---------------------------------------------------------------------------
 def test_attractor_converges_with_few_shoots():
-    """Attractor, N_shoot=5, theta0=0 — закрепляет гейт rss_stall_tol.
+    """Attractor, N_shoot=5, theta0=0 - pins down the rss_stall_tol gate.
 
-    Без гейта mu утаптывается на ранних итерациях (rss ещё падает на порядки,
-    а стыковка колеблется), ограничения начинают доминировать, и решение
-    запирается на консистентной траектории вдали от измерений
-    (rel_err ~ 1.2, rss ~ 9e3 при r_cont ~ 1e-10). С гейтом тот же случай
-    сходится: rel_err ~ 3e-4, стыковка затягивается до ~1e-10.
+    Without the gate mu collapses on the early iterations and the solution
+    locks onto a consistent trajectory far from the measurements
+    (rel_err ~ 1.2, rss ~ 9e3 at r_cont ~ 1e-10). With the gate the same case
+    converges: rel_err ~ 3e-4 and the junction tightens to ~1e-10.
     """
     config = dict(SYSTEMS_CONFIG["Attractor"], N_shoot=5)
     _, t_meas, meas = generate_data(config)
@@ -203,22 +195,20 @@ def test_attractor_converges_with_few_shoots():
                                                 track_covariance=False)
 
     err = rel_err(theta_opt, config["true_params"])
-    assert err < 1e-2, f"запирание на консистентной траектории: rel_err={err:.3e}"
-    # стыковка при этом дотянута штрафом, а не брошена
+    assert err < 1e-2, f"locked onto a consistent trajectory: rel_err={err:.3e}"
+    # and the junction is pulled in by the penalty rather than abandoned
     assert hist["r_cont"][-1] < 1e-6
 
 
 # ---------------------------------------------------------------------------
-# Цикл действительно МИНИМИЗИРУЕТ: эталон - стоимость в истинной точке
+# The loop really MINIMIZES: the reference is the cost at the true parameters
 # ---------------------------------------------------------------------------
 def test_beats_cost_at_true_parameters():
-    """Найденная точка не хуже истинных параметров по той же стоимости.
+    """The point found is no worse than the true parameters, by the same cost.
 
-    Раньше здесь сравнивались два наших цикла между собой — сверка была
-    взаимной и уехала бы вместе с общей ошибкой. Эталон тут внешний:
-    параметры, которыми данные были сгенерированы. Оптимум зашумлённой
-    задачи не обязан совпадать с истиной, но стоимость в нём обязана быть
-    не выше — иначе цикл не дошёл до минимума.
+    The reference is external: the parameters the data was generated with. The
+    optimum of a noisy problem need not coincide with the truth, but its cost
+    must not be higher - otherwise the loop did not reach a minimum.
     """
     config = SYSTEMS_CONFIG["LotkaVolterra"]
     _, t_meas, meas = generate_data(config)
@@ -232,12 +222,12 @@ def test_beats_cost_at_true_parameters():
     cost_true = NormalEquations.from_jacobian(*prob.solve(theta_true)).cost()
 
     assert cost_opt <= cost_true * (1 + 1e-6), \
-        f"цикл не дошёл до минимума: cost {cost_opt:.6e} > истинная {cost_true:.6e}"
+        f"the loop did not reach a minimum: cost {cost_opt:.6e} > true {cost_true:.6e}"
     assert rel_err(theta_opt, config["true_params"]) < 0.2
 
 
 # ---------------------------------------------------------------------------
-# Single shooting (J_G пусто): чистый LM, ранняя остановка на точных данных
+# Single shooting (J_G empty): plain LM, early stop on exact data
 # ---------------------------------------------------------------------------
 def test_single_shooting_early_stop():
     config = dict(SYSTEMS_CONFIG["LotkaVolterra"], N_shoot=1,
@@ -248,14 +238,14 @@ def test_single_shooting_early_stop():
 
     theta_opt, hist = run_optimization_adaptive(prob, theta_full, n_iter=50)
 
-    # точность упирается в допуски интегратора (RTOL=1e-5), не в шум данных
+    # accuracy is limited by the integrator tolerances (RTOL=1e-5), not by noise
     assert rel_err(theta_opt, config["true_params"]) < 5e-3
-    # сходимость к полу интегратора -> остановка сильно раньше лимита
+    # convergence to the integrator floor stops the loop well before the limit
     assert len(hist["mu"]) - 1 < 50
 
 
 # ---------------------------------------------------------------------------
-# Работает и с коллокационным интегратором (тот же контракт solve)
+# Works with the collocation integrator too (same solve contract)
 # ---------------------------------------------------------------------------
 def test_works_with_collocation():
     config = SYSTEMS_CONFIG["LotkaVolterra"]
@@ -267,7 +257,3 @@ def test_works_with_collocation():
 
     err = rel_err(theta_opt, config["true_params"])
     assert err < 0.05, f"Estimation error too high: {err}"
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--tb=short"])

@@ -1,26 +1,15 @@
-# -*- coding: utf-8 -*-
-"""Ковариация theta при точных ограничениях непрерывности.
+"""Covariance of theta under exact continuity constraints.
 
-Непрерывность — ограничение, а не измерение, поэтому ковариация берётся из
-ККТ-матрицы [[H, J_G^T], [J_G, 0]], а не из H + J_G^T J_G. Прежняя формула
-завышала интервалы тем сильнее, чем больше шутов, и зависела от
-произвольного масштаба J_G.
+Two independent EXTERNAL references:
+1. single shooting - the same estimator without any constraints, so its
+   covariance is the ordinary least-squares one; multiple shooting must agree;
+2. Monte-Carlo - the predicted standard error against the actual spread of the
+   estimates over noise realizations, and the coverage of the 95% intervals.
 
-Эталоны здесь ВНЕШНИЕ, два независимых:
-1. single shooting — тот же оценщик, но ограничений нет вовсе, поэтому
-   ковариация считается обычной формулой МНК; multiple shooting обязан
-   давать то же самое;
-2. Монте-Карло — предсказанное СКО против фактического разброса оценок по
-   реализациям шума и покрытие 95%-х интервалов.
+See docs/math.md for why (H + J_G^T J_G) is the wrong formula.
 """
-from pathlib import Path
-import sys
 
 import numpy as np
-
-repo_root = Path(__file__).parent.parent
-sys.path.insert(0, str(repo_root))
-
 from commom_utils.systems import LotkaVoltera
 from commom_utils.ode_system import SyntheticDataGenerator
 from gauss_newton.problem import MultipleShooting
@@ -57,7 +46,7 @@ def se_of(ne):
 
 
 # ---------------------------------------------------------------------------
-# Эталон 1: single shooting (ограничений нет) — MS обязан совпасть
+# Reference 1: single shooting (no constraints) - MS must agree
 # ---------------------------------------------------------------------------
 def test_matches_single_shooting():
     t_meas, meas = generate_data(0)
@@ -66,11 +55,11 @@ def test_matches_single_shooting():
 
     assert ne_ms.n_cont > 0 and ne_ss.n_cont == 0
     rel = np.abs(se_of(ne_ms) / se_of(ne_ss) - 1.0)
-    assert rel.max() < 0.05, f"MS и single shooting разошлись на {rel.max():.1%}"
+    assert rel.max() < 0.05, f"MS and single shooting differ by {rel.max():.1%}"
 
 
 # ---------------------------------------------------------------------------
-# Ограничение не имеет масштаба: J_G можно умножить на что угодно
+# A constraint has no scale: J_G may be multiplied by anything
 # ---------------------------------------------------------------------------
 def test_invariant_to_constraint_scaling():
     t_meas, meas = generate_data(0)
@@ -79,11 +68,11 @@ def test_invariant_to_constraint_scaling():
     scaled = NormalEquations(H=ne.H, g=ne.g, J_G=1e3 * ne.J_G, R_G=1e3 * ne.R_G,
                              rss=ne.rss, n_rows=ne.n_rows)
     ratio = se_of(scaled) / se_of(ne)
-    assert np.abs(ratio - 1.0).max() < 1e-6, f"зависимость от масштаба: {ratio}"
+    assert np.abs(ratio - 1.0).max() < 1e-6, f"depends on the scale: {ratio}"
 
 
 # ---------------------------------------------------------------------------
-# Эталон 2: Монте-Карло — разброс оценок и покрытие интервалов
+# Reference 2: Monte-Carlo - spread of the estimates and interval coverage
 # ---------------------------------------------------------------------------
 def test_coverage_monte_carlo():
     n_runs = 12
@@ -97,16 +86,16 @@ def test_coverage_monte_carlo():
 
     empirical = theta_hat.std(axis=0, ddof=1)
     ratio = se_pred.mean(axis=0) / empirical
-    # выборка мала, поэтому полоса широкая; прежняя формула давала 1.6-2.4
+    # the sample is small, hence the wide band; the old formula gave 1.6-2.4
     assert np.all(ratio > 0.6) and np.all(ratio < 1.5), \
-        f"предсказанное СКО не согласуется с разбросом: {ratio}"
+        f"predicted standard error disagrees with the spread: {ratio}"
 
     covered = (np.abs(theta_hat - TRUE) <= 1.96 * se_pred).mean(axis=0)
-    assert np.all(covered >= 0.75), f"покрытие 95% интервалов слишком мало: {covered}"
+    assert np.all(covered >= 0.75), f"coverage of the 95% intervals is too low: {covered}"
 
 
 # ---------------------------------------------------------------------------
-# sigma^2 — только по измерениям; dof — по числу СВОБОДНЫХ неизвестных
+# sigma^2 from the measurements only; dof from the number of FREE unknowns
 # ---------------------------------------------------------------------------
 def test_sigma2_and_dof():
     t_meas, meas = generate_data(0)
@@ -119,7 +108,7 @@ def test_sigma2_and_dof():
 
 
 # ---------------------------------------------------------------------------
-# Диагностика идентифицируемости из той же ковариации
+# Identifiability diagnostics from the same covariance
 # ---------------------------------------------------------------------------
 def test_correlation_diagnostics():
     t_meas, meas = generate_data(0)
@@ -131,7 +120,7 @@ def test_correlation_diagnostics():
     assert np.allclose(corr, corr.T, atol=1e-10)
     assert np.abs(corr).max() <= 1.0 + 1e-10
     assert cond >= 1.0
-    # у Лотки-Вольтерры alpha и beta почти неразличимы порознь
+    # in Lotka-Volterra alpha and beta are nearly indistinguishable apart
     assert abs(corr[0, 1]) > 0.9, f"corr(alpha, beta) = {corr[0, 1]:.3f}"
 
 

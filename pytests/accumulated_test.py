@@ -1,12 +1,5 @@
-from pathlib import Path
-import sys
-
 import numpy as np
 import pytest
-
-repo_root = Path(__file__).parent.parent
-sys.path.insert(0, str(repo_root))
-
 from commom_utils.systems import LotkaVoltera, Attractor
 from commom_utils.ode_system import SyntheticDataGenerator
 from gauss_newton.problem import MultipleShooting
@@ -55,7 +48,7 @@ def generate_data(config, seed=0):
 def make_problem(config, t_meas, meas, cls=MultipleShootingAccum, **kwargs):
     system = config["class"]()
     if cls in (MultipleShooting, MultipleShootingAccum):
-        # у коллокационных классов use_jax выставляется внутри
+        # the collocation classes set use_jax themselves
         kwargs.setdefault("use_jax", True)
     prob = cls(system=system, N_shoot=config["N_shoot"],
                gamma=np.ones(system.n_obs), c0_cost=1.0, **kwargs)
@@ -68,7 +61,7 @@ def rel_err(theta, true):
 
 
 # ---------------------------------------------------------------------------
-# Накопленные H, g совпадают с J^T J, J^T R (J не строится, но математика та же)
+# Accumulated H, g match J^T J, J^T R (J is never built, the math is the same)
 # ---------------------------------------------------------------------------
 def test_accumulated_matches_dense():
     config = SYSTEMS_CONFIG["LotkaVolterra"]
@@ -76,9 +69,9 @@ def test_accumulated_matches_dense():
     prob = make_problem(config, t_meas, meas)
     theta_full = prob.make_full_theta(config["theta_init"])
 
-    J, R, J_G, R_G = prob.solve(theta_full)              # путь через большую J
+    J, R, J_G, R_G = prob.solve(theta_full)              # the explicit-J path
     dense = NormalEquations.from_jacobian(J, R, J_G, R_G)
-    accum = prob.normal_equations(theta_full)            # накопление
+    accum = prob.normal_equations(theta_full)            # the accumulated path
 
     H_ref = dense.H.toarray()
     assert np.abs(accum.H.toarray() - H_ref).max() < 1e-9 * np.abs(H_ref).max()
@@ -86,13 +79,13 @@ def test_accumulated_matches_dense():
     assert abs(accum.rss - dense.rss) < 1e-9 * dense.rss
     assert accum.n_rows == dense.n_rows == len(R)
 
-    # стыковки собираются тем же кодом (continuity_rows)
+    # the junction rows come from the same code (continuity_rows)
     assert np.abs((accum.J_G - J_G).toarray()).max() < 1e-15
     assert np.abs(accum.R_G - R_G).max() < 1e-15
 
 
 # ---------------------------------------------------------------------------
-# Шаг не зависит от того, откуда пришли H и g
+# The step does not depend on where H and g came from
 # ---------------------------------------------------------------------------
 def test_step_matches_dense():
     config = SYSTEMS_CONFIG["LotkaVolterra"]
@@ -111,7 +104,7 @@ def test_step_matches_dense():
 
 
 # ---------------------------------------------------------------------------
-# Ковариация из H совпадает с ковариацией из [J; J_G]
+# Covariance from H matches the covariance from [J; J_G]
 # ---------------------------------------------------------------------------
 def test_covariance_matches_dense():
     config = SYSTEMS_CONFIG["LotkaVolterra"]
@@ -121,8 +114,8 @@ def test_covariance_matches_dense():
     n_theta = len(config["true_params"])
 
     J, R, J_G, R_G = prob.solve(theta_full)
-    # Эталон — та же формула, но из построенной J (NormalEquations.from_jacobian
-    # сохранена именно как эталонная сборка, в цикле оптимизации не участвует)
+    # The reference is the same formula but from an explicit J: from_jacobian
+    # is kept precisely as the reference assembly and is not used in the loop
     cov_ref, sigma2_ref, dof_ref = NormalEquations.from_jacobian(
         J, R, J_G, R_G).covariance_theta(n_theta)
     cov, sigma2, dof = prob.normal_equations(theta_full).covariance_theta(n_theta)
@@ -133,7 +126,7 @@ def test_covariance_matches_dense():
 
 
 # ---------------------------------------------------------------------------
-# Сквозная идентификация на накопленном пути
+# End-to-end identification on the accumulated path
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("system_name", list(SYSTEMS_CONFIG.keys()))
 def test_identification_accum(system_name):
@@ -150,12 +143,12 @@ def test_identification_accum(system_name):
           f"solves={hist['n_solves']}")
     assert err < 0.05, f"Estimation error too high: {err}"
     assert len(hist["accepted"]) > 0
-    # история пригодна для plot_solution: длины совпадают с theta
+    # the history is usable by plot_solution: lengths match theta
     assert len(hist["r_meas"]) == len(hist["theta"]) == len(hist["ci_low"])
 
 
 # ---------------------------------------------------------------------------
-# Оба пути (J и накопление) дают один и тот же результат — цикл общий
+# Both paths (explicit J and accumulation) give the same result
 # ---------------------------------------------------------------------------
 def test_agrees_with_dense_path():
     config = SYSTEMS_CONFIG["LotkaVolterra"]
@@ -174,7 +167,7 @@ def test_agrees_with_dense_path():
 
 
 # ---------------------------------------------------------------------------
-# Работает и с коллокационным интегратором
+# Works with the collocation integrator too
 # ---------------------------------------------------------------------------
 def test_collocation_accum():
     config = SYSTEMS_CONFIG["LotkaVolterra"]
@@ -187,7 +180,3 @@ def test_collocation_accum():
 
     err = rel_err(theta_opt, config["true_params"])
     assert err < 0.05, f"Estimation error too high: {err}"
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--tb=short"])

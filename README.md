@@ -1,45 +1,46 @@
-# GaussNewton — идентификация параметров ОДУ
+# GaussNewton — ODE parameter identification
 
 [![CI](https://github.com/IlyaChichkanov/GaussNewton/actions/workflows/ci.yml/badge.svg)](https://github.com/IlyaChichkanov/GaussNewton/actions/workflows/ci.yml)
 
-Оценка параметров θ нелинейных динамических систем по зашумлённым измерениям:
-**метод Гаусса–Ньютона + multiple shooting**, с совместной оценкой θ и начальных
-состояний шутов. Дополнительно — **MHE** (скользящее окно, рекурсивный вариант
-для реального времени) и **MPC** на acados.
+Estimation of the parameters θ of nonlinear dynamical systems from noisy
+measurements: **Gauss–Newton with multiple shooting**, estimating θ and the
+shot initial states jointly. Also included: **MHE** (sliding window, with a
+recursive real-time variant) and **MPC** on acados.
 
 ![gauss newton visualisation](gauss_newton/demo.gif)
 
-## Возможности
+## Features
 
-- Символьное описание модели на CasADi, якобианы генерируются автоматически.
-- **Два интегратора чувствительностей:**
-  - вариационные уравнения (`scipy solve_ivp` / `jax odeint`) — явные методы,
-    для нежёстких систем;
-  - ортогональные коллокации **Радо IIA** с точными производными дискретной
-    схемы (IND) — L-устойчивы, применимы к жёстким системам.
-- **Два способа собрать шаг:** через разреженную матрицу J или накоплением
-  H = ΣJᵢᵀJᵢ и g = ΣJᵢᵀrᵢ, когда большую J строить не нужно.
-- **Адаптивная регуляризация:** λ по gain ratio (Нильсен), μ по кривизне
-  с ужесточением по Пауэллу — ручной подбор не требуется.
-- Ковариация θ и доверительные интервалы (Шур-комплемент по полной системе
-  [J; J_G], корреляция θ с начальными состояниями учитывается).
-- Несколько батчей данных с общими параметрами; генератор синтетических данных.
-- Визуализация на plotly: фазовые траектории 2D/3D, временные ряды, сходимость
-  параметров с CI, невязки измерений и непрерывности.
+- Symbolic models in CasADi; Jacobians are generated automatically.
+- **Two sensitivity integrators:**
+  - variational equations (`scipy solve_ivp` / `jax odeint`) — explicit methods
+    for non-stiff systems;
+  - orthogonal collocation on **Radau IIA** with exact derivatives of the
+    discrete scheme (IND) — L-stable, applicable to stiff systems.
+- **Two ways to assemble the step:** through a sparse J, or by accumulating
+  H = ΣJᵢᵀJᵢ and g = ΣJᵢᵀrᵢ when the big J is not needed.
+- **Adaptive regularization:** λ by gain ratio (Nielsen), μ from the curvature
+  with Powell tightening — no manual tuning.
+- Covariance of θ and confidence intervals from the KKT matrix, so continuity
+  is treated as a constraint rather than as an observation.
+- Several data batches sharing the parameters; a synthetic data generator.
+- Plotly visualisation: 2D/3D phase trajectories, time series, parameter
+  convergence with confidence intervals, measurement and continuity residuals.
 
-## Установка
+## Install
 
 ```bash
-uv sync                 # зависимости
-bash tools/setup_repo.sh   # git-фильтр, вычищающий вывод из ноутбуков
+uv sync                    # dependencies
+bash tools/setup_repo.sh   # git filter that strips notebook output
 ```
 
-`tools/setup_repo.sh` обязателен при первом клонировании: `.gitattributes`
-объявляет фильтр `nbstrip`, но сам фильтр — локальная настройка git и в
-репозитории не хранится. Без него git молча закоммитит ноутбуки вместе с
-картинками и встроенным `plotly.js` (сотни килобайт на файл).
+`tools/setup_repo.sh` is required on a fresh clone: `.gitattributes` declares
+the `nbstrip` filter, but the filter itself is a local git setting and is not
+stored in the repository. Without it git will silently commit notebooks
+together with their images and the embedded `plotly.js` (hundreds of kilobytes
+per file).
 
-## Быстрый старт
+## Quick start
 
 ```python
 import numpy as np
@@ -50,99 +51,74 @@ from gauss_newton.adaptive import run_optimization_adaptive
 
 system = LotkaVoltera()
 
-# синтетические данные
+# synthetic data
 gen = SyntheticDataGenerator(system, sigma=0.01, use_jax=True)
 t_batches, meas_batches, _, _ = gen.generate(
     c0=np.array([6.0, 5.0]), theta=np.array([1.2, 0.4, 0.3, 0.1]),
     time_intervals=[(0.0, 4.0)], n_measurements=200)
 
-# задача: 5 шутов, единичные веса измерений
+# the problem: 5 shots, unit measurement weights
 problem = MultipleShootingAccum(system, N_shoot=5, gamma=np.ones(system.n_obs))
 problem.add_batch(meas_batches[0], t_batches[0])
 
 theta_full = problem.make_full_theta(np.array([1.0, 0.5, 0.2, 0.05]))
 theta_opt, hist = run_optimization_adaptive(problem, theta_full, verbose=True)
 
-print("θ:", theta_opt[:system.n_theta])
+print("theta:", theta_opt[:system.n_theta])
 print("95% CI:", hist["ci_low"][-1], hist["ci_high"][-1])
 ```
 
-Для жёстких систем достаточно поменять класс задачи — интерфейс тот же:
+For stiff systems only the problem class changes; the interface is the same:
 
 ```python
 from gauss_newton.normal_equations import CollocationShootingAccum
 problem = CollocationShootingAccum(system, N_shoot=5, gamma=np.ones(system.n_obs),
-                                   K=3, n_sub=2)   # Радо IIA, 3 стадии
+                                   K=3, n_sub=2)   # Radau IIA, 3 stages
 ```
 
-### Свои модели
+### Your own models
 
-Наследуйтесь от `ODESystem` (`commom_utils/ode_system.py`) и задайте
-`get_derivative`, при необходимости `observation` и `get_input_signals`:
+Subclass `ODESystem` (`commom_utils/ode_system.py`) and define
+`get_derivative`, plus `observation` and `get_input_signals` if needed:
 
 ```python
 class MyModel(ODESystem):
     def __init__(self):
-        super().__init__(nx=2, n_theta=3, nu=1)   # порядок: nx, n_theta, nu
+        super().__init__(nx=2, n_theta=3, nu=1)   # order: nx, n_theta, nu
 
     def get_derivative(self, state, theta, u):
-        return ca.vertcat(...)                   # CasADi-выражение
+        return ca.vertcat(...)                    # a CasADi expression
 
     def observation(self, state, theta, u):
-        return ca.vertcat(state[0])              # что реально измеряется
+        return ca.vertcat(state[0])               # what is actually measured
 
     def get_input_signals(self, t):
-        return [jnp.sin(t)]                      # см. предупреждение ниже
+        return [jnp.sin(t)]                       # see the warning below
 ```
 
-**`get_input_signals` вызывается изнутри правой части ОДУ**, в том числе с
-трассируемым временем под `jax odeint` и с массивом времени в коллокациях.
-Поэтому: только `jnp`, никаких питоновских `if t < ...` (используйте
-`jnp.where`) и `math.*`. Разрывные по времени входы дают неконтролируемую
-ошибку у адаптивного явного интегратора — см. «Известные ограничения».
+**`get_input_signals` is called inside the ODE right-hand side**, including
+with a traced time under `jax odeint` and with an array of times in the
+collocation path. So: `jnp` only, no Python `if t < ...` (use `jnp.where`) and
+no `math.*`. Inputs that are discontinuous in time give an uncontrolled error
+with the explicit adaptive integrator — see
+[docs/pitfalls.md](docs/pitfalls.md).
 
-## Цикл оптимизации
-
-Цикл один — `run_optimization_adaptive` (`gauss_newton/adaptive.py`), и ручной
-подбор μ₀, `mu_dec` и λ для него не нужен:
-
-| | как подбирается |
-|---|---|
-| λ (демпфер Марквардта) | по gain ratio, схема Нильсена |
-| μ (вес невязок стыковки) | старт по кривизне ‖J_G‖²_F/tr(H), ужесточение по Пауэллу — только когда ‖R_G‖² не падает сама |
-| принятие шага | ρ > 0 по Φ_μ = ‖R‖² + (1/μ)‖R_G‖², то есть по той функции, для которой шаг и посчитан |
-| остановка | автоматическая: серия отказов, стагнация или pred ≈ 0 |
-
-Прежний цикл с ручным расписанием μ (`run_optimization` + `compute_delta_gn`)
-удалён: он был второй копией той же математики и успел разойтись с первой в
-регуляризации диагонали. Схема воспроизведена локально в
-`adaptive_regularization.ipynb` — там она предмет сравнения, а не рабочий код.
-
-## Тесты
+## Tests
 
 ```bash
-uv run pytest pytests/ -v         # весь набор (68 passed, 2 skipped)
-uv run pytest pytests/jacobian_fd_test.py -v   # якобиан против конечных разностей
-GN_TEST_PLOT=1 uv run pytest pytests/collocation_accum_test.py   # с графиками
+uv run pytest pytests/ -v         # everything (91 passed, 2 skipped)
+uv run pytest pytests/jacobian_fd_test.py -v   # Jacobian vs finite differences
+GN_TEST_PLOT=1 uv run pytest pytests/collocation_accum_test.py   # with figures
 ```
 
-Тесты `pytests/mhe_test.py` и `pytests/mpc_test.py` пропускаются, если не
-установлен acados.
+`pytests/mhe_test.py` and `pytests/mpc_test.py` are skipped when acados is not
+installed. What each test guards is described in
+[docs/testing.md](docs/testing.md).
 
-Состав: сверка накопительного пути с плотным, коллокаций с `solve_ivp`,
-таблиц Радо с аналитическими значениями, шага ГН с плотным
-`numpy.linalg.solve` той же седловой системы и — сверка с внешним эталоном —
-якобиана с конечными разностями.
+## MHE and MPC
 
-Отдельно `pytests/regression_test.py` держит замороженные матрицы шага
-(`J`, `R`, `J_G`, `R_G`, `H`, `g`, `delta`) для четырёх задач: он ловит
-изменения ЧИСЕЛ, которые не приводят к падению — перестановку осей, другой
-порядок вычислений. Эталон пересоздаётся `GN_REGEN_REFERENCE=1`, и делать это
-стоит только когда изменение осознанное.
-
-## MHE и MPC
-
-Требуют **acados**, который ставится из исходников, а не из PyPI:
+These need **acados**, which is built from source rather than installed from
+PyPI:
 
 ```bash
 git clone https://github.com/acados/acados.git && cd acados
@@ -153,48 +129,56 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:<acados>/lib
 export ACADOS_SOURCE_DIR=<acados>
 ```
 
-## Структура
+## Documentation
+
+| Page | What is in it |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | Layers, classes and how they call each other |
+| [docs/api-reference.md](docs/api-reference.md) | Every public class and function |
+| [docs/math.md](docs/math.md) | The method and the μ/λ schedules |
+| [docs/notation.md](docs/notation.md) | Theory ↔ code symbol table |
+| [docs/pitfalls.md](docs/pitfalls.md) | Non-obvious failure modes |
+| [docs/testing.md](docs/testing.md) | What each test guards |
+| [docs/performance.md](docs/performance.md) | Measured timings |
+| [docs/style.md](docs/style.md) | Comment and docstring rules |
+
+Derivations live in the theory notebooks at the repository root (in Russian):
+`theory_gauss_newton.ipynb`, `collocation.ipynb`,
+`adaptive_regularization.ipynb`, `theory_mhe.ipynb`.
+
+## Repository layout
 
 ```
-commom_utils/
-  ode_system.py      ODESystem, CompiledModel, VariationalIntegrator, SystemIntegrator, генераторы данных
-  sensitivity.py     SensitivityTrajectory (x, S_theta, S_c), группировка шутов
-  collocation.py     таблицы Радо IIA и коллокационный интегратор
-  systems.py         конкретные модели; system_config.py — их конфигурации
-gauss_newton/
-  problem.py         сборка задачи: ShootRows, UnknownsLayout, MultipleShooting
-  normal_equations.py  NormalEquations (H, g), накопление, ковариация, CI
-  adaptive.py        gn_step и run_optimization_adaptive
-  collocation_shooting.py, utils.py
-mhe/ mpc/         MHE и MPC на acados (кода, ноутбуков здесь больше нет)
+commom_utils/     model, sensitivities, collocation, example systems
+gauss_newton/     problem assembly, normal equations, optimization, plotting
+mhe/  mpc/        MHE and MPC on acados
 experiments/
-  sintetic_data/  прогоны на синтетике: gauss_newton_test, mhe_test
-  real_data_cars/ прогоны на реальных данных машин (Ceed, Voyah)
-  datasets/       сырые CSV и CAN-логи — вне git, см. datasets/README.md
+  sintetic_data/  runs on synthetic data
+  real_data_cars/ runs on real vehicle data (Ceed, Voyah)
+  datasets/       raw CSV and CAN logs — outside git, see datasets/README.md
   data_utils.py   LogReaderV2, theta_to_physical
-pytests/          тесты
-tools/            nbstrip.py (git-фильтр), setup_repo.sh
-*.ipynb           теория: theory_gauss_newton, collocation,
-                  adaptive_regularization, theory_mhe
+pytests/          tests
+tools/            nbstrip.py (git filter), setup_repo.sh
+docs/             documentation
+*.ipynb           theory notebooks
 ```
 
-Ноутбуки в `experiments/` начинаются с bootstrap-ячейки: она поднимается от
-текущего каталога до `pyproject.toml`, кладёт корень в `sys.path` и задаёт
-`DATASETS` (переопределяется переменной `GN_DATASETS`). Поэтому ноутбук
-одинаково работает и из Jupyter, и при запуске раннером из корня.
+Notebooks under `experiments/` open with a bootstrap cell that walks up from
+the current directory to `pyproject.toml`, puts the repository root on
+`sys.path` and defines `DATASETS` (overridable with `GN_DATASETS`), so a
+notebook works the same from Jupyter and from a runner started at the root.
 
-**`NOTATION.md` — таблица «теория ↔ код»**: как формула из ноутбука называется
-в коде. Подробная карта модулей и математика — в `CLAUDE.md`.
+## Known limitations
 
-## Известные ограничения
-
-- **Разрывные по времени входные сигналы.** Адаптивный явный интегратор не
-  знает про излом, перешагивает его, и на содержащем разрыв интервале
-  чувствительности теряют несколько порядков точности (зафиксировано в
+- **Time-discontinuous input signals.** The explicit adaptive integrator does
+  not know about the kink, steps over it, and the sensitivities lose several
+  digits on the interval containing it (recorded in
   `pytests/jacobian_fd_test.py::test_discontinuous_input_degrades_sensitivities`).
-  Обход: ставить границу шута в точку разрыва или использовать коллокации.
-- **Коллокации идут фиксированным шагом**: точность определяется `n_sub`,
-  оценки ошибки нет — проверяйте сходимость прогоном с `n_sub` и `2*n_sub`.
-- `SyntheticDataGenerator` добавляет шум **к состояниям** до вычисления h(x)
-  (шум процесса, не измерения); в `MHESyntheticDataGenerator` шум на выходе.
-- Границы на θ есть только в MHE; в GN-части параметры не ограничены.
+  Work around it by putting a shot boundary at the discontinuity, or use
+  collocation.
+- **Collocation runs at a fixed step**: accuracy is set by `n_sub` and there is
+  no error estimate — check convergence by running `n_sub` and `2*n_sub`.
+- `SyntheticDataGenerator` adds noise **to the states** before computing h(x)
+  (process noise, not measurement noise); `MHESyntheticDataGenerator` adds it
+  to the output.
+- Bounds on θ exist only in MHE; the Gauss–Newton part has no parameter bounds.

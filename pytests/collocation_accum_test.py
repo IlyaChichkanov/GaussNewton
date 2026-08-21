@@ -1,20 +1,10 @@
-"""Идентификация через CollocationShootingAccum — по образцу gauss_newton_test.py.
+"""Identification through CollocationShootingAccum.
 
-Отличия от gauss_newton_test.py:
-- задача — CollocationShootingAccum (коллокации Радо IIA + накопление H и g,
-  большая J не строится);
-- цикл — run_optimization_adaptive (mu и lambda подбираются сами, ручного
-  config.mu нет);
-- визуализация — тот же plot_solution с теми же аргументами.
+Same shape as gauss_newton_test.py, but the problem is Radau IIA collocation
+with accumulated H and g, so neither the big J nor a manual mu is involved.
 """
 import pytest
 import numpy as np
-from pathlib import Path
-import sys
-
-repo_root = Path(__file__).parent.parent
-sys.path.insert(0, str(repo_root))
-
 from commom_utils.systems import LotkaVoltera, Attractor
 from commom_utils.ode_system import SyntheticDataGenerator
 from gauss_newton.normal_equations import CollocationShootingAccum
@@ -23,8 +13,8 @@ from gauss_newton.utils import plot_solution
 
 import os
 
-# По умолчанию фигуры НЕ открываются: fig.show() в тесте вешает CI и любой
-# headless-прогон. Включить локально: GN_TEST_PLOT=1 pytest ...
+# Figures stay closed by default: fig.show() hangs CI and any headless run.
+# Enable locally with GN_TEST_PLOT=1 pytest ...
 PLOT = os.environ.get("GN_TEST_PLOT", "0") not in ("0", "", "false", "False")
 
 SYSTEMS_CONFIG = {
@@ -36,8 +26,8 @@ SYSTEMS_CONFIG = {
         "n_measurements": 50,
         "noise_sigma": 1e-15,
         "N_shoot": 1,
-        "n_sub": 1,          # элементов коллокации на интервал между измерениями
-        "theta_init": np.array([1.0, 0.5, 0.2, 0.05]),  # смещённое начальное приближение
+        "n_sub": 1,          # collocation elements per measurement interval
+        "theta_init": np.array([1.0, 0.5, 0.2, 0.05]),  # deliberately off
     },
     "Attractor": {
         "class": Attractor,
@@ -47,14 +37,14 @@ SYSTEMS_CONFIG = {
         "n_measurements": 100,
         "noise_sigma": 0.01,
         "N_shoot": 20,
-        "n_sub": 2,          # хаотическая система — сетка вдвое мельче
+        "n_sub": 2,          # chaotic system, so a twice finer grid
         "theta_init": np.array([0.0, 0.0, 0.0]),
     },
 }
 
 
 def pytest_generate_tests(metafunc):
-    """Отдельный вызов теста на каждую систему из SYSTEMS_CONFIG."""
+    """One test invocation per system in SYSTEMS_CONFIG."""
     if "system_name" in metafunc.fixturenames:
         metafunc.parametrize("system_name", list(SYSTEMS_CONFIG.keys()),
                              scope="function")
@@ -88,7 +78,7 @@ def time_interval(system_config):
 @pytest.fixture
 def synthetic_data(system, true_params, initial_state, time_interval,
                    system_config):
-    np.random.seed(0)   # воспроизводимый шум
+    np.random.seed(0)   # reproducible noise
     gen = SyntheticDataGenerator(
         system,
         sigma=system_config["noise_sigma"],
@@ -153,7 +143,3 @@ def test_identification(system, true_params, synthetic_data, system_config):
             theta_true=true_params,
         )
         fig.show()
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--tb=short"])

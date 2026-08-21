@@ -1,26 +1,19 @@
-import sys
-from pathlib import Path
-repo_root = Path(__file__).parent.parent
-sys.path.insert(0, str(repo_root))
 import math
 import plotly.io as pio
 import numpy as np
 import pytest
-import pytest
 
-# acados ставится из исходников, а не из PyPI: без него модуль
-# целиком пропускается, иначе падала СБОРКА всего pytests/
+# acados is built from source, not installed from PyPI; without it the whole
+# module is skipped, otherwise collection of all of pytests/ would fail
 pytest.importorskip("acados_template",
-                    reason="acados_template не установлен — см. README")
+                    reason="acados_template is not installed, see README")
 
 from acados_template import AcadosOcp
 from commom_utils.ode_system import check_system_ok, MHESyntheticDataGenerator
 from commom_utils.systems import KinematicModel, DelayOffset, LotkaVoltera  # add other systems as needed
-from commom_utils.system_config import create_system, create_mhe_params
 from mhe.mhe_base_model_interface import MheCogeGenerator
 from mhe.params import MheParams
 from mhe.mhe_utils import run_mhe_estimation, reset_mhe_solver, plot_mhe_slider_lines
-
 
 
 def get_input_signals_bycicle(t):
@@ -46,15 +39,14 @@ SYSTEM_CONFIGS = {
         "theta_true": np.array([0.4, 0.2]),
         "delta_theta": np.array([0.2, -0.2]),
         "input_signal": lambda t: harmonic(t),        #
-        #"observation": lambda state, theta, u: state,  # по умолчанию весь state
         "get_initial_state": lambda y_meas, u, theta: np.hstack((u, 0)),
         "sigma_noise": np.array([0.01])
     },
 
     "KinematicBycicle": {
-        "class": KinematicModel,                     # модель из MHE (возможно, упрощённая)
+        "class": KinematicModel,
         "args": [True],                                # wheelbase
-        "c0": np.array([0.0]),                         # одномерное состояние? Уточните
+        "c0": np.array([0.0]),
         "theta_true": np.array([0.05, np.deg2rad(0.5)]),
         "delta_theta": np.array([0.01, np.deg2rad(1.0)]),
         "input_signal": get_input_signals_bycicle,
@@ -67,7 +59,7 @@ SYSTEM_CONFIGS = {
         "c0": np.array([0.4, 3.0]),
         "theta_true": np.array([0.8, 0.2, 0.3, 0.1]),
         "delta_theta": np.array([0.1, 0.15, 0.1, 0.5]) * 1.0, #+ (np.random.rand(4) - 0.5) * 0.05,
-        "input_signal": None,                          # нет входа
+        "input_signal": None,                          # no inputs
         "get_initial_state": lambda y_meas, u, theta: y_meas,
         "sigma_noise": np.array([0.1, 0.1])
     },
@@ -123,7 +115,7 @@ def create_system(cfg: dict):
 
 
 def create_mhe_params(mhe_cfg: dict, dt: float, mhe_horizont: int):
-    """Создаёт объект MheParams на основе MHE_CONFIGS."""
+    """MheParams from an MHE_CONFIGS entry."""
     return MheParams(
         dt=dt,
         mhe_horizont=mhe_horizont,
@@ -195,7 +187,7 @@ def test_mhe_identification(system_config, tmp_path):
 
     initial_theta = (delta_theta + theta_true)
 
-    # Инициализация
+    # Initialization
     dt = mhe_params.dt
     nx = generator.get_model().state_length
     n_theta = generator.get_model().param_length
@@ -206,15 +198,15 @@ def test_mhe_identification(system_config, tmp_path):
                     initial_theta,
                     N_meas,
                     dt)
-    # Априорная неопределённость параметров (например, ±2 сигмы от возмущения)
+    # Prior uncertainty of the parameters (about 2 sigma of the perturbation)
     initial_std = np.abs(delta_theta) * 1.5
 
-    # Начальная ковариационная матрица расширенного состояния
+    # Initial covariance of the extended state
     initial_sigma = np.eye(nx + n_theta)
-    initial_sigma[:nx, :nx] *= 1e1          # большая неопределённость для состояний
-    initial_sigma[nx:, nx:] = np.diag(initial_std ** 2)   # умеренная для параметров
+    initial_sigma[:nx, :nx] *= 1e1          # large uncertainty for the states
+    initial_sigma[nx:, nx:] = np.diag(initial_std ** 2)   # moderate for the parameters
 
-    # Запуск MHE
+    # Run MHE
     print("run_mhe_estimation")
     results = run_mhe_estimation(
         mhe_model=generator.get_model(),
@@ -222,15 +214,15 @@ def test_mhe_identification(system_config, tmp_path):
         get_window_func=get_window,
         get_initial_state_func=system.get_initial_state,
         overlap_points=overlap_points,
-        initial_theta=initial_theta,               # начальная оценка параметров
+        initial_theta=initial_theta,               # initial parameter estimate
         mhe_params=mhe_params,
         num_windows=num_windows,
-        dt=dt,                                     # шаг дискретизации
-        r_inv=mhe_params.measurements_residual_r,  # весовая матрица измерений
-        q_state_diag=1e-6,                         # шум процесса (состояния)
+        dt=dt,                                     # sampling step
+        r_inv=mhe_params.measurements_residual_r,  # measurement weights
+        q_state_diag=1e-6,                         # process noise (states)
         q_param_diag=1e-6,
-        initial_sigma=initial_sigma,               # начальная ковариация
-        ridge_reg=1e-6,                            # регуляризация FIM
+        initial_sigma=initial_sigma,               # initial covariance
+        ridge_reg=1e-6,                            # FIM regularization
     )
 
     # import plotly.graph_objects as go
@@ -241,7 +233,7 @@ def test_mhe_identification(system_config, tmp_path):
     print(f'rel_error : {rel_error}')
     print(f'final_theta_est - {final_theta_est}, theta_true - {theta_true}')
     plot = 1
-    pio.renderers.default = 'browser'   # или 'browser'
+    pio.renderers.default = 'browser'
     if (plot):
         fig = plot_mhe_slider_lines(
             results,
@@ -249,8 +241,6 @@ def test_mhe_identification(system_config, tmp_path):
             initial_params=initial_theta,
             initial_std=initial_std,
             theta_true=theta_true,
-            # state_names=['ψ (predicted)'],
-            # meas_names=['ψ (meas)', 'ω (meas)'],
             # param_names=['GR', 'offset'],
             fontsize = 18,
             figsize=(1200, 1000)

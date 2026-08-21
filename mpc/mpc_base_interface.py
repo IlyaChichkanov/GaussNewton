@@ -8,7 +8,7 @@ from casadi import SX, vertcat
 from commom_utils.ocp_utils import generate_header, is_discrete, quadform
 from commom_utils.ode_system import ODESystem
 from mpc.params import CarParams, MpcParams
-from commom_utils.systems import *
+from commom_utils.systems import DelaySystem
 
 class MpcModel(ABC):
     def __init__(self, system: ODESystem):
